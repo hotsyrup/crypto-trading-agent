@@ -1,6 +1,10 @@
 import json
 from collections import Counter
+from decimal import Decimal
 
+from app.market_data import get_eth_usd_price
+from app.paper_portfolio import load_portfolio
+from app.paper_trader import STARTING_BALANCE
 from app.trade_journal import JOURNAL_PATH
 
 
@@ -14,7 +18,12 @@ def load_records() -> list[dict]:
 
 def generate_report() -> dict:
     records = load_records()
+    portfolio = load_portfolio()
+    current_eth_price = get_eth_usd_price()
     signal_counts = Counter(record["signal"] for record in records)
+
+    total_value = portfolio.usdc_balance + portfolio.eth_balance * current_eth_price
+    simulated_profit_loss = total_value - STARTING_BALANCE
 
     return {
         "total_decisions": len(records),
@@ -22,16 +31,25 @@ def generate_report() -> dict:
         "sell_signals": signal_counts["SELL"],
         "hold_signals": signal_counts["HOLD"],
         "latest_signal": records[-1]["signal"] if records else "NONE",
+        "usdc_balance": portfolio.usdc_balance,
+        "eth_balance": portfolio.eth_balance,
+        "eth_price": current_eth_price,
+        "total_value": total_value,
+        "profit_loss": simulated_profit_loss,
     }
 
 
 if __name__ == "__main__":
     report = generate_report()
 
-    print("Paper-Trading Activity Report")
+    print("Paper-Trading Performance Report")
     print(f"Total decisions: {report['total_decisions']}")
     print(f"BUY signals: {report['buy_signals']}")
     print(f"SELL signals: {report['sell_signals']}")
     print(f"HOLD signals: {report['hold_signals']}")
     print(f"Latest signal: {report['latest_signal']}")
-    print("Profit and loss tracking will be added after portfolio accounting.")
+    print(f"Simulated USDC: ${report['usdc_balance']:,.2f}")
+    print(f"Simulated ETH: {report['eth_balance']}")
+    print(f"Current ETH price: ${report['eth_price']:,.2f}")
+    print(f"Total simulated value: ${report['total_value']:,.2f}")
+    print(f"Simulated profit/loss: ${report['profit_loss']:,.2f}")
