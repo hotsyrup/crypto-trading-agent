@@ -4,6 +4,7 @@ from decimal import Decimal
 from app.market_data import get_recent_closing_prices
 from app.paper_trader import calculate_max_risk
 from app.strategy import Signal, generate_signal
+from app.trade_journal import record_decision
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,15 @@ def create_trade_proposal() -> TradeProposal:
 if __name__ == "__main__":
     proposal = create_trade_proposal()
 
+    record_decision(
+        signal=proposal.signal,
+        reference_price=proposal.reference_price,
+        maximum_risk=proposal.maximum_risk,
+        paper_only=proposal.paper_only,
+    )
+
     print(f"Signal: {proposal.signal.value}")
     print(f"Reference price: ${proposal.reference_price:,.2f}")
     print(f"Maximum paper risk: ${proposal.maximum_risk:,.2f}")
     print(f"Paper trading only: {proposal.paper_only}")
+    print("Decision recorded in private local journal.")
