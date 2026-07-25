@@ -8,24 +8,30 @@ A modular AI-assisted crypto trading agent designed for research, backtesting, p
 * Collect and analyze crypto market data
 * Generate trading signals
 * Apply strict risk-management rules
-* Backtest strategies before deployment
 * Simulate trades using paper trading
 * Record every trading decision and result
 * Support collaborative strategy development without exposing wallet keys or exchange credentials
 
-## Planned Architecture
+## Current Paper-Trading MVP
 
-The project will use separate components for:
+The current version can:
 
-* Market data
-* Trading strategies
-* Risk management
-* Portfolio management
-* Trade execution
-* Performance tracking
-* Monitoring and alerts
+* Connect to Base mainnet in read-only mode
+* Read a public Base USDC balance
+* Collect ETH/USD market prices
+* Generate a moving-average signal
+* Apply a 0.5% simulated risk limit
+* Simulate an ETH order
+* Record decisions in a private local journal
+* Run automatic tests
 
-No single component should have unrestricted access to both strategy development and live funds.
+It cannot sign or submit wallet transactions.
+
+### Run the Paper Bot
+
+```bash
+python -m app.run_paper_bot
+```
 
 ## Security
 
@@ -35,28 +41,9 @@ No single component should have unrestricted access to both strategy development
 * Require testing and approval before deploying strategy changes
 * Begin with paper trading and small position sizes
 
-## Initial Milestone
-
-The first version will:
-
-1. Download historical market data
-2. Run a basic trading strategy
-3. Apply position-sizing and loss limits
-4. Simulate orders
-5. Save trade logs
-6. Generate a simple performance report
-
-## Initial Technology
-
-* Python
-* FastAPI
-* PostgreSQL
-* Docker
-* GitHub Actions
-
 ## Project Status
 
-Early development. Paper trading only. No real funds or live wallet access.
+Paper trading only. No real funds or live wallet access.
 
 ## Disclaimer
 
