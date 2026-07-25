@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from app.paper_execution import PaperOrder
 from app.paper_portfolio import PaperPortfolio
+from app.risk_manager import RiskDecision
 from app.run_paper_bot import run_paper_bot
 from app.strategy import Signal
 from app.trading_cycle import TradeProposal
@@ -13,14 +14,16 @@ class RunPaperBotTests(unittest.TestCase):
     @patch("app.run_paper_bot.record_decision")
     @patch("app.run_paper_bot.save_portfolio")
     @patch("app.run_paper_bot.apply_order")
+    @patch("app.run_paper_bot.evaluate_risk")
     @patch("app.run_paper_bot.load_portfolio")
     @patch("app.run_paper_bot.simulate_order")
     @patch("app.run_paper_bot.create_trade_proposal")
-    def test_run_paper_bot_updates_simulated_portfolio(
+    def test_approved_trade_updates_simulated_portfolio(
         self,
         mock_create_trade_proposal,
         mock_simulate_order,
         mock_load_portfolio,
+        mock_evaluate_risk,
         mock_apply_order,
         mock_save_portfolio,
         mock_record_decision,
@@ -49,11 +52,16 @@ class RunPaperBotTests(unittest.TestCase):
         mock_create_trade_proposal.return_value = proposal
         mock_simulate_order.return_value = order
         mock_load_portfolio.return_value = portfolio
+        mock_evaluate_risk.return_value = RiskDecision(
+            approved=True,
+            reason="Paper trade approved.",
+        )
         mock_apply_order.return_value = updated_portfolio
 
         with patch("builtins.print"):
             run_paper_bot()
 
+        mock_evaluate_risk.assert_called_once_with(proposal, portfolio)
         mock_apply_order.assert_called_once_with(portfolio, order)
         mock_save_portfolio.assert_called_once_with(updated_portfolio)
         mock_record_decision.assert_called_once()
