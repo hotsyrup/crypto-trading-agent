@@ -1,4 +1,5 @@
 from app.paper_execution import simulate_order
+from app.paper_portfolio import apply_order, load_portfolio, save_portfolio
 from app.trade_journal import record_decision
 from app.trading_cycle import create_trade_proposal
 
@@ -6,6 +7,15 @@ from app.trading_cycle import create_trade_proposal
 def run_paper_bot() -> None:
     proposal = create_trade_proposal()
     order = simulate_order(proposal)
+    portfolio = load_portfolio()
+
+    try:
+        updated_portfolio = apply_order(portfolio, order)
+        save_portfolio(updated_portfolio)
+        order_result = order.status
+    except ValueError as error:
+        updated_portfolio = portfolio
+        order_result = f"REJECTED: {error}"
 
     record_decision(
         signal=proposal.signal,
@@ -18,7 +28,9 @@ def run_paper_bot() -> None:
     print(f"Reference price: ${proposal.reference_price:,.2f}")
     print(f"Simulated amount: ${order.amount_usdc:,.2f}")
     print(f"Simulated ETH quantity: {order.quantity_eth}")
-    print(f"Order status: {order.status}")
+    print(f"Order result: {order_result}")
+    print(f"Simulated USDC balance: ${updated_portfolio.usdc_balance:,.2f}")
+    print(f"Simulated ETH balance: {updated_portfolio.eth_balance}")
     print("No real transaction was submitted.")
 
 
