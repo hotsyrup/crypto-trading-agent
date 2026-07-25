@@ -6,30 +6,33 @@ from urllib.request import Request, urlopen
 
 
 TRENDING_URL = (
-    "https://api.geckoterminal.com/api/v2/"
-    "networks/base/trending_pools"
+    "https://api.geckoterminal.com/api/v2/networks/base/"
+    "trending_pools?include=base_token,quote_token,dex"
 )
-
+TOKEN_URL = "https://api.geckoterminal.com/api/v2/networks/base/tokens/{address}"
 MINIMUM_LIQUIDITY_USD = Decimal("100000")
 MINIMUM_DAILY_VOLUME_USD = Decimal("100000")
 MINIMUM_POOL_AGE_DAYS = 7
 MAXIMUM_DAILY_CHANGE_PERCENT = Decimal("50")
-CORE_ASSETS = {
-    "WETH",
-    "ETH",
-    "USDC",
-    "USDT",
-    "DAI",
-    "cbBTC",
-    "CBBTC",
-}
+CORE_ASSETS = {"WETH", "ETH", "USDC", "USDT", "DAI", "CBBTC"}
+
+
+@dataclass(frozen=True)
+class TokenMetadata:
+    address: str
+    name: str
+    symbol: str
+    decimals: int
+    price_usd: Decimal
 
 
 @dataclass(frozen=True)
 class TrendingPool:
     name: str
     pool_address: str
-    price_usd: Decimal
+    dex_id: str
+    base_token: TokenMetadata
+    quote_token: TokenMetadata
     liquidity_usd: Decimal
     daily_volume_usd: Decimal
     hourly_change_percent: Decimal
@@ -37,32 +40,68 @@ class TrendingPool:
     created_at: datetime
 
 
-def fetch_trending_pools() -> list[TrendingPool]:
-    request = Request(
-        TRENDING_URL,
-        headers={"User-Agent": "crypto-trading-agent"},
+def to_decimal(value: object) -> Decimal:
+    return Decimal("0") if value is None else Decimal(str(value))
+
+
+def get_json(url: str) -> dict:
+    request = Request(url, headers={"User-Agent": "crypto-trading-agent"})
+    with urlopen(request, timeout=10) as response:
+        return json.load(response)
+
+
+def create_token_metadata(
+    included_by_id: dict[str, dict],
+    token_id: str,
+    price_usd: object,
+) -> TokenMetadata:
+    attributes = included_by_id[token_id]["attributes"]
+    return TokenMetadata(
+        address=attributes["address"].lower(),
+        name=attributes["name"],
+        symbol=attributes["symbol"].upper(),
+        decimals=int(attributes.get("decimals") or 0),
+        price_usd=to_decimal(price_usd),
     )
 
-    with urlopen(request, timeout=10) as response:
-        payload = json.load(response)
 
+def fetch_trending_pools() -> list[TrendingPool]:
+    payload = get_json(TRENDING_URL)
+    included_by_id = {
+        item["id"]: item for item in payload.get("included", [])
+    }
     pools = []
 
     for item in payload["data"]:
         attributes = item["attributes"]
+        relationships = item["relationships"]
+        base_id = relationships["base_token"]["data"]["id"]
+        quote_id = relationships["quote_token"]["data"]["id"]
 
         pools.append(
             TrendingPool(
                 name=attributes["name"],
-                pool_address=attributes["address"],
-                price_usd=Decimal(attributes["base_token_price_usd"] or "0"),
-                liquidity_usd=Decimal(attributes["reserve_in_usd"] or "0"),
-                daily_volume_usd=Decimal(attributes["volume_usd"].get("h24") or "0"),
-                hourly_change_percent=Decimal(
-                    attributes["price_change_percentage"].get("h1") or "0"
+                pool_address=attributes["address"].lower(),
+                dex_id=relationships["dex"]["data"]["id"],
+                base_token=create_token_metadata(
+                    included_by_id,
+                    base_id,
+                    attributes.get("base_token_price_usd"),
                 ),
-                daily_change_percent=Decimal(
-                    attributes["price_change_percentage"].get("h24") or "0"
+                quote_token=create_token_metadata(
+                    included_by_id,
+                    quote_id,
+                    attributes.get("quote_token_price_usd"),
+                ),
+                liquidity_usd=to_decimal(attributes.get("reserve_in_usd")),
+                daily_volume_usd=to_decimal(
+                    attributes.get("volume_usd", {}).get("h24")
+                ),
+                hourly_change_percent=to_decimal(
+                    attributes.get("price_change_percentage", {}).get("h1")
+                ),
+                daily_change_percent=to_decimal(
+                    attributes.get("price_change_percentage", {}).get("h24")
                 ),
                 created_at=datetime.fromisoformat(
                     attributes["pool_created_at"].replace("Z", "+00:00")
@@ -73,23 +112,26 @@ def fetch_trending_pools() -> list[TrendingPool]:
     return pools
 
 
+def fetch_token_price(address: str) -> Decimal:
+    payload = get_json(TOKEN_URL.format(address=address))
+    return to_decimal(payload["data"]["attributes"].get("price_usd"))
+
+
+def get_non_core_token(pool: TrendingPool) -> TokenMetadata | None:
+    for token in (pool.base_token, pool.quote_token):
+        if token.symbol not in CORE_ASSETS:
+            return token
+    return None
+
+
 def contains_non_core_asset(pool: TrendingPool) -> bool:
-    pair = pool.name.split(" / ")
-
-    if len(pair) < 2:
-        return False
-
-    first_asset = pair[0].strip()
-    second_asset = pair[1].split()[0].strip()
-
-    return first_asset not in CORE_ASSETS or second_asset not in CORE_ASSETS
+    return get_non_core_token(pool) is not None
 
 
 def select_trial_candidates(pools: list[TrendingPool]) -> list[TrendingPool]:
     oldest_allowed_creation = (
         datetime.now(timezone.utc) - timedelta(days=MINIMUM_POOL_AGE_DAYS)
     )
-
     candidates = [
         pool
         for pool in pools
@@ -101,20 +143,22 @@ def select_trial_candidates(pools: list[TrendingPool]) -> list[TrendingPool]:
         and pool.daily_change_percent > 0
         and pool.daily_change_percent <= MAXIMUM_DAILY_CHANGE_PERCENT
     ]
-
     return sorted(candidates, key=lambda pool: pool.daily_volume_usd, reverse=True)
 
 
 if __name__ == "__main__":
     trending_pools = fetch_trending_pools()
     candidates = select_trial_candidates(trending_pools)
-
     print(f"Trending Base pools received: {len(trending_pools)}")
     print(f"Pools passing initial safety filters: {len(candidates)}")
 
     for pool in candidates[:5]:
+        token = get_non_core_token(pool)
+        if token is None:
+            continue
         print(
-            f"{pool.name} | "
+            f"{token.symbol} ({token.name}) | Contract: {token.address} | "
+            f"Pool: {pool.name} | DEX: {pool.dex_id} | "
             f"Liquidity: ${pool.liquidity_usd:,.0f} | "
             f"24h volume: ${pool.daily_volume_usd:,.0f} | "
             f"1h change: {pool.hourly_change_percent}% | "

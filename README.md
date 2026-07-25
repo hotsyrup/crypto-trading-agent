@@ -33,6 +33,26 @@ It cannot sign or submit wallet transactions.
 python -m app.run_paper_bot
 ```
 
+## Seven-Day Trending Token Trial
+
+The optional trial scans trending Base pools and paper-trades qualifying
+non-core tokens using their exact contract addresses. It starts with $40 in
+simulated USDC, limits each entry to $4, holds at most three positions, models
+1% trading costs on entries and exits, and applies 8% stop-loss and 15%
+take-profit exits.
+
+```bash
+python -m app.trending_trial
+```
+
+The scheduled GitHub Actions workflow can run one cycle every six hours.
+It preserves paper state in a GitHub Actions cache and uploads each run's
+paper journal as an artifact. Scheduled workflows only begin after the
+workflow is merged into the default branch.
+
+This scanner is suitable for a paper experiment only. Its liquidity, volume,
+pool-age, and momentum filters are not a complete token security audit.
+
 ## Security
 
 * Never store private keys, seed phrases, API secrets, or passwords in this repository
