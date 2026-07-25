@@ -24,6 +24,9 @@ def record_decision(
     reference_price: Decimal,
     maximum_risk: Decimal,
     paper_only: bool,
+    risk_approved: bool | None = None,
+    risk_reason: str = "Not evaluated.",
+    order_status: str = "NOT_EVALUATED",
 ) -> None:
     _ensure_data_dir()
 
@@ -33,6 +36,9 @@ def record_decision(
         "reference_price": str(reference_price),
         "maximum_risk": str(maximum_risk),
         "paper_only": paper_only,
+        "risk_approved": risk_approved,
+        "risk_reason": risk_reason,
+        "order_status": order_status,
     }
 
     with JOURNAL_PATH.open("a", encoding="utf-8") as journal:

@@ -17,8 +17,8 @@ class PerformanceReportTests(unittest.TestCase):
         mock_get_eth_usd_price,
     ) -> None:
         mock_load_records.return_value = [
-            {"signal": "BUY"},
-            {"signal": "HOLD"},
+            {"signal": "BUY", "risk_approved": True},
+            {"signal": "HOLD", "risk_approved": False},
             {"signal": "SELL"},
         ]
         mock_load_portfolio.return_value = PaperPortfolio(
@@ -33,6 +33,8 @@ class PerformanceReportTests(unittest.TestCase):
         self.assertEqual(report["buy_signals"], 1)
         self.assertEqual(report["sell_signals"], 1)
         self.assertEqual(report["hold_signals"], 1)
+        self.assertEqual(report["approved_orders"], 1)
+        self.assertEqual(report["rejected_orders"], 1)
         self.assertEqual(report["total_value"], Decimal("9000"))
         self.assertEqual(report["profit_loss"], Decimal("-1000"))
 

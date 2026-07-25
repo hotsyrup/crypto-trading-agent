@@ -35,6 +35,9 @@ def run_paper_bot() -> None:
         reference_price=proposal.reference_price,
         maximum_risk=proposal.maximum_risk,
         paper_only=proposal.paper_only,
+        risk_approved=risk_decision.approved,
+        risk_reason=risk_decision.reason,
+        order_status=order_result,
     )
 
     print(f"Signal: {proposal.signal.value}")
