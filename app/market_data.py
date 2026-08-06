@@ -1,5 +1,6 @@
 import json
 from decimal import Decimal
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -8,12 +9,16 @@ CANDLES_URL = (
     "https://api.exchange.coinbase.com/products/ETH-USD/candles"
     "?granularity=3600"
 )
+ALLOWED_API_HOSTS = {"api.exchange.coinbase.com"}
 
 
 def get_json(url: str):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_API_HOSTS:
+        raise ValueError("Only approved HTTPS market-data endpoints are allowed")
     request = Request(url, headers={"User-Agent": "crypto-trading-agent"})
 
-    with urlopen(request, timeout=10) as response:
+    with urlopen(request, timeout=10) as response:  # nosec B310
         return json.load(response)
 
 
