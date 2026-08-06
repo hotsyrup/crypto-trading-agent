@@ -1,0 +1,9 @@
+# Current hosted Base services. Base MCP uses OAuth and returns an approval
+# link for every send, swap, signature, or contract call.
+[mcp_servers.base-mcp]
+url = "https://mcp.base.org/"
+
+# Read-only, live Base documentation. Keep this separate from the wallet MCP
+# so implementation research never requires wallet authorization.
+[mcp_servers.base-docs]
+url = "https://docs.base.org/mcp"

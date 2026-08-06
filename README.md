@@ -27,6 +27,29 @@ The current version can:
 
 It cannot sign or submit wallet transactions.
 
+## Current Base MCP Gateway
+
+This repository includes project-scoped Codex MCP configuration for Base's
+current hosted services:
+
+* `base-mcp` — `https://mcp.base.org/` for Base Account wallets, balances,
+  swaps, sends, signatures, contract calls, and x402 payments
+* `base-docs` — `https://docs.base.org/mcp` for live, read-only Base
+  documentation
+
+The retired `base-mcp` npm package is not used. Open this repository as a
+trusted Codex project, restart Codex after first checkout, and authenticate
+`base-mcp` with Base Account when prompted. Verify the connections with:
+
+```bash
+codex mcp list
+```
+
+Base MCP does not silently authorize live trading. Every send, swap,
+signature, or contract call returns an approval link that must be reviewed and
+confirmed in Base Account. The Python bot remains paper-only; adding the MCP
+gateway does not give scheduled jobs or the container unattended wallet access.
+
 ### Run the Paper Bot
 
 ```bash
