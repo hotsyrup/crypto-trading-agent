@@ -18,6 +18,8 @@ controls, and a future bounded live-execution path for Lumen's Trading Agent.
   authorization.
 - Base MCP's interactive approval flow is not unattended signing authority.
 - Tests must not submit transactions or call live financial write endpoints.
+- Telegram is an outbound reporting channel only. It must not accept commands,
+  callbacks, trade approvals, wallet operations, or configuration changes.
 
 ## Required validation
 

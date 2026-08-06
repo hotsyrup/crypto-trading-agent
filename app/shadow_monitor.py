@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app.live_trading_config import load_live_trading_config
+from app.telegram_reporter import report_is_due, send_daily_report
 from app.trade_journal import record_decision
 from app.trading_cycle import create_trade_proposal
 
@@ -49,6 +50,26 @@ def run_shadow_cycle() -> None:
         reference_price=str(proposal.reference_price),
     )
     print(json.dumps(STATE), flush=True)
+
+    now = datetime.now(timezone.utc)
+    if report_is_due(now):
+        try:
+            send_daily_report(STATE, now)
+            STATE.update(telegram_report_status="sent", telegram_report_error=None)
+        except Exception as error:  # reporting must not stop cloud monitoring
+            STATE.update(
+                telegram_report_status="failed",
+                telegram_report_error=type(error).__name__,
+            )
+        print(
+            json.dumps(
+                {
+                    "telegram_daily_report": STATE.get("telegram_report_status"),
+                    "error": STATE.get("telegram_report_error"),
+                }
+            ),
+            flush=True,
+        )
 
 
 class HealthHandler(BaseHTTPRequestHandler):
