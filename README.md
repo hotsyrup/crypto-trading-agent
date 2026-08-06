@@ -50,6 +50,37 @@ signature, or contract call returns an approval link that must be reviewed and
 confirmed in Base Account. The Python bot remains paper-only; adding the MCP
 gateway does not give scheduled jobs or the container unattended wallet access.
 
+### Wallet Roles
+
+The app keeps two Base wallet roles separate:
+
+* **Trading treasury:** `ihaveonefriend.base.eth`, resolved and pinned as
+  `0x3c981ec319107be8b8bb614da0742fc5b28e8d9c`
+* **Lumen Agentic Wallet:** configured separately through
+  `LUMEN_AGENTIC_WALLET_ADDRESS`; do not commit its credentials
+
+The public addresses identify accounts but do not grant signing authority.
+Never add private keys, seed phrases, recovery data, passwords, session tokens,
+or approval credentials to the repository or Railway environment.
+
+## Adopted Live Trading Limits
+
+Ben adopted a bounded live mandate on 2026-08-06. The application now carries
+the initial limits as validated environment configuration:
+
+* USDC and ETH on Base only
+* 20% maximum allocation to one position
+* 5% maximum initial allocation to a newly promoted strategy
+* Stop new positions after a 5% daily loss
+* Halt at a 20% drawdown pending human review
+* No leverage, borrowing, derivatives, shorting, unknown contracts, or
+  unlimited approvals
+
+`LIVE_TRADING_ENABLED` intentionally defaults to `false`. The mandate grants
+authority, but execution must remain fail-closed until the live order path,
+high-water-mark accounting, daily-loss accounting, audit journal, stale-data
+checks, and emergency kill switch are implemented and verified.
+
 ### Run the Paper Bot
 
 ```bash
@@ -86,7 +117,11 @@ pool-age, and momentum filters are not a complete token security audit.
 
 ## Project Status
 
-Paper trading only. No real funds or live wallet access.
+The live mandate and treasury identity are recorded, but execution remains
+disabled. The current runtime can research, paper trade, and read the public
+treasury balance; it cannot yet submit unattended live orders. The next
+milestone is an always-on Railway Hobby deployment with enforceable accounting,
+risk controls, audit records, stale-data protection, and a kill switch.
 
 ## Disclaimer
 

@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from web3 import Web3
 
 from app.base_connection import web3
+from app.wallet_config import load_wallet_config
 
 
 load_dotenv()
@@ -27,11 +28,8 @@ USDC_ABI = [
 
 
 def get_usdc_balance() -> float:
-    wallet_address = os.getenv("WALLET_ADDRESS")
+    wallet_address = load_wallet_config().trading_wallet_address
     usdc_address = os.getenv("USDC_CONTRACT_ADDRESS")
-
-    if not wallet_address:
-        raise ValueError("WALLET_ADDRESS is missing.")
 
     if not usdc_address:
         raise ValueError("USDC_CONTRACT_ADDRESS is missing.")
