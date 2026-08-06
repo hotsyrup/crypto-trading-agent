@@ -3,7 +3,7 @@ name: Security baseline
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/base-mcp-gateway]
   workflow_dispatch:
 
 permissions:
