@@ -17,4 +17,4 @@ RUN mkdir /app/data \
 
 USER botuser
 
-CMD ["python", "-m", "app.run_paper_bot"]
+CMD ["python", "-m", "app.shadow_monitor"]
