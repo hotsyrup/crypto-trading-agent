@@ -1,11 +1,27 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from app.shadow_monitor import run_shadow_cycle, validate_execution_boundary
+from app.shadow_monitor import (
+    TimedHTTPServer,
+    run_shadow_cycle,
+    validate_execution_boundary,
+)
 
 
 class ShadowMonitorTests(unittest.TestCase):
+    @patch("http.server.HTTPServer.get_request")
+    def test_health_server_times_out_slow_clients(self, get_request) -> None:
+        request = MagicMock()
+        get_request.return_value = (request, ("127.0.0.1", 12345))
+        server = object.__new__(TimedHTTPServer)
+
+        accepted_request, client_address = server.get_request()
+
+        self.assertIs(accepted_request, request)
+        self.assertEqual(client_address, ("127.0.0.1", 12345))
+        request.settimeout.assert_called_once_with(5.0)
+
     def test_default_boundary_is_monitoring_only(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(validate_execution_boundary(), 3600)
