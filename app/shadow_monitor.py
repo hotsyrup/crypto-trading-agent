@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from app.live_trading_config import load_live_trading_config
 from app.telegram_reporter import report_is_due, send_daily_report
@@ -88,11 +88,22 @@ class HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve_health() -> ThreadingHTTPServer:
+class TimedHTTPServer(HTTPServer):
+    """Serve one bounded health request at a time with slow-client protection."""
+
+    request_timeout_seconds = 5.0
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.request_timeout_seconds)
+        return request, client_address
+
+
+def serve_health() -> TimedHTTPServer:
     port = int(os.getenv("PORT", "8080"))
     # Railway's private ingress requires the container process to bind all
     # interfaces; the service exposes only non-sensitive health state.
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)  # nosec B104
+    server = TimedHTTPServer(("0.0.0.0", port), HealthHandler)  # nosec B104
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
