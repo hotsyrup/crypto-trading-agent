@@ -1,0 +1,43 @@
+name: CodeCrucible SARIF
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Build pinned CodeCrucible
+        run: |
+          git clone https://github.com/block/codecrucible.git "$RUNNER_TEMP/codecrucible"
+          git -C "$RUNNER_TEMP/codecrucible" checkout d3459986ed96ab3891c0c4ab9ea1626638cecf71
+          make -C "$RUNNER_TEMP/codecrucible" build
+      - name: Estimate scan scope and input cost
+        run: "$RUNNER_TEMP/codecrucible/codecrucible scan . --dry-run --max-cost 1.00"
+      - name: Run audited security scan
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODECRUCIBLE_OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY"
+          "$RUNNER_TEMP/codecrucible/codecrucible" scan . \
+            --provider openai \
+            --model gpt-5.6 \
+            --prompts-dir "$RUNNER_TEMP/codecrucible/prompts/exploit-proof" \
+            --max-cost 1.00 \
+            --max-output-tokens 4000 \
+            --concurrency 1 \
+            --fail-on-severity 7.0 \
+            --output codecrucible.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: codecrucible.sarif
