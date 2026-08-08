@@ -37,7 +37,14 @@ jobs:
             --concurrency 1 \
             --fail-on-severity 7.0 \
             --output codecrucible.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+      - uses: actions/upload-artifact@v4
         if: always()
+        with:
+          name: codecrucible-sarif
+          path: codecrucible.sarif
+          if-no-files-found: warn
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        continue-on-error: true
         with:
           sarif_file: codecrucible.sarif
