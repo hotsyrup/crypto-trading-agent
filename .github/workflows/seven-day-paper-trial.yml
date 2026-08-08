@@ -19,7 +19,7 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Restore paper state
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: data
           key: paper-trial-${{ github.run_id }}
@@ -27,7 +27,7 @@ jobs:
       - name: Run one paper cycle
         run: python -m app.trending_trial
       - name: Save paper state
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: data
           key: paper-trial-${{ github.run_id }}
