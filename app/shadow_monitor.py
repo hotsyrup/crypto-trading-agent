@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from app.live_trading_config import load_live_trading_config
+from app.paper_portfolio import load_portfolio
+from app.risk_accounting import evaluate_portfolio_risk
+from app.safety_gate import evaluate_safety_gate
 from app.telegram_reporter import report_is_due, send_daily_report
 from app.trade_journal import record_decision
 from app.trading_cycle import create_trade_proposal
@@ -17,6 +20,17 @@ STATE: dict[str, object] = {
     "last_cycle_at": None,
     "last_error": None,
 }
+
+PUBLIC_HEALTH_FIELDS = ("mode", "status", "last_cycle_at")
+
+
+def public_health_state() -> dict[str, object]:
+    """Return only the non-sensitive fields safe for an unauthenticated probe."""
+    return {
+        "service": "crypto-trading-agent",
+        "schema_version": 1,
+        **{field: STATE.get(field) for field in PUBLIC_HEALTH_FIELDS},
+    }
 
 
 def validate_execution_boundary() -> int:
@@ -33,6 +47,11 @@ def validate_execution_boundary() -> int:
 
 def run_shadow_cycle() -> None:
     proposal = create_trade_proposal()
+    safety_gate = evaluate_safety_gate(proposal)
+    accounting = evaluate_portfolio_risk(
+        load_portfolio(),
+        proposal.reference_price,
+    )
     record_decision(
         signal=proposal.signal,
         reference_price=proposal.reference_price,
@@ -41,6 +60,24 @@ def run_shadow_cycle() -> None:
         risk_approved=False,
         risk_reason="Shadow monitoring mandate: execution disabled.",
         order_status="SHADOW_ONLY",
+        market_data_observed_at=proposal.market_data_observed_at,
+        market_data_received_at=proposal.market_data_received_at,
+        safety_gate_allowed=safety_gate.allowed,
+        safety_gate_reason=safety_gate.reason,
+        kill_switch_state=safety_gate.kill_switch_state,
+        market_data_age_seconds=safety_gate.market_data_age_seconds,
+        accounting_ready=accounting.ready,
+        accounting_reason=accounting.reason,
+        portfolio_value=accounting.current_value,
+        high_water_mark=accounting.high_water_mark,
+        daily_start_value=accounting.daily_start_value,
+        drawdown_percent=accounting.drawdown_percent,
+        daily_loss_percent=accounting.daily_loss_percent,
+        accounting_date=(
+            accounting.daily_date.isoformat()
+            if accounting.daily_date is not None
+            else None
+        ),
     )
     STATE.update(
         status="healthy",
@@ -48,6 +85,32 @@ def run_shadow_cycle() -> None:
         last_error=None,
         signal=proposal.signal.value,
         reference_price=str(proposal.reference_price),
+        safety_status="ready" if safety_gate.allowed else "blocked",
+        safety_reason=safety_gate.reason,
+        kill_switch_state=safety_gate.kill_switch_state,
+        market_data_age_seconds=safety_gate.market_data_age_seconds,
+        accounting_status="ready" if accounting.ready else "blocked",
+        accounting_reason=accounting.reason,
+        portfolio_value=(
+            str(accounting.current_value)
+            if accounting.current_value is not None
+            else None
+        ),
+        high_water_mark=(
+            str(accounting.high_water_mark)
+            if accounting.high_water_mark is not None
+            else None
+        ),
+        drawdown_percent=(
+            str(accounting.drawdown_percent)
+            if accounting.drawdown_percent is not None
+            else None
+        ),
+        daily_loss_percent=(
+            str(accounting.daily_loss_percent)
+            if accounting.daily_loss_percent is not None
+            else None
+        ),
     )
     print(json.dumps(STATE), flush=True)
 
@@ -77,9 +140,11 @@ class HealthHandler(BaseHTTPRequestHandler):
         if self.path not in {"/", "/health"}:
             self.send_error(404)
             return
-        payload = json.dumps(STATE).encode("utf-8")
+        payload = json.dumps(public_health_state()).encode("utf-8")
         self.send_response(200 if STATE["status"] != "failed" else 503)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

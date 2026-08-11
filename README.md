@@ -27,6 +27,40 @@ The current version can:
 
 It cannot sign or submit wallet transactions.
 
+## TreasuryPolicy Observation Layer
+
+`app.treasury_policy` evaluates proposed paid service calls before any x402 or
+other operating-wallet purchase. It records the service, provider, purpose,
+expected benefit, price, remaining budget, evidence, cheaper alternative, and
+the decision it would recommend. The initial mode is permanently
+`observation_only`: an affirmative observation is not payment authorization,
+and the module contains no wallet, signer, HTTP payment, or transaction path.
+
+The evaluator fails closed for recurring commitments, prohibited purposes,
+missing evidence, missing cheaper-alternative analysis, and proposals above
+the remaining budget. Observations can be appended to
+`data/treasury_policy_journal.jsonl` for later comparison with actual results.
+The current security gate and remaining requirements are recorded in
+`docs/X402_SECURITY_REVIEW.md`.
+
+`app.service_receipts` adds an append-only, privacy-minimized receipt ledger
+and provider scorecard. It records quoted and settled USDC, delivery outcome,
+usefulness, a masked transaction reference, and the post-attempt balance.
+Malformed journals fail closed. A provider that has charged without returning
+a result receives a `manual_review` recommendation that TreasuryPolicy treats
+as a reason not to recommend the next purchase. This remains observation-only:
+neither module can call a service, sign, settle, retry, or move funds.
+
+To inspect current scorecards without contacting a provider or wallet:
+
+```bash
+python scripts/report_service_scorecards.py
+```
+
+The default receipt journal is local runtime data under
+`data/x402_service_receipts.jsonl` and remains excluded from Git. Durable
+human-readable purchase history stays in Ben AI Home's `LUMEN_WALLET.md`.
+
 ## Current Base MCP Gateway
 
 This repository includes project-scoped Codex MCP configuration for Base's
@@ -69,6 +103,8 @@ Ben adopted a bounded live mandate on 2026-08-06. The application now carries
 the initial limits as validated environment configuration:
 
 * USDC and ETH on Base only
+* Base USDC is pinned to its exact contract address; copied symbols and
+  unsolicited assets fail closed
 * 20% maximum allocation to one position
 * 5% maximum initial allocation to a newly promoted strategy
 * Stop new positions after a 5% daily loss
@@ -81,11 +117,71 @@ authority, but execution must remain fail-closed until the live order path,
 high-water-mark accounting, daily-loss accounting, audit journal, stale-data
 checks, and emergency kill switch are implemented and verified.
 
+## Lumen Trading Executor — Stage 1
+
+`app.trading_executor` is the first deterministic execution-policy layer. It
+accepts a structured trade intent and current risk snapshot, then verifies:
+
+* the exact authorized Base treasury and return address
+* Base mainnet chain ID 8453
+* native ETH and the official Base USDC contract
+* ETH/USDC unleveraged spot scope only
+* the 20% position and 5% new-strategy limits
+* the 5% daily-loss and 20% drawdown halts
+* fresh, timezone-aware market, risk, and intent timestamps
+* strategy identity, version, and source provenance
+* complete, non-contradictory risk state
+
+The composed entry point records every decision in a locked, append-only JSONL
+journal with sequence numbers and a SHA-256 hash chain. Reusing an intent ID is
+blocked after restart, changing the content behind an existing ID fails closed,
+and corruption or journal unavailability prevents progress.
+
+This stage is deliberately `shadow_only`. It refuses
+`LIVE_TRADING_ENABLED=true`, defaults its independent kill switch to `halted`,
+always returns `ready_for_submission=false`, and contains no signer, wallet,
+allowance, swap, RPC write, transaction construction, or broadcast method. A
+`SHADOW_APPROVED` decision is evidence that policy checks passed—not permission
+or ability to trade.
+
+The local decision journal defaults to `data/execution_decisions.jsonl`, which
+remains excluded from Git. See `docs/LUMEN_TRADING_EXECUTOR.md` for its contract
+and the requirements that still precede any live canary.
+
 ### Run the Paper Bot
 
+The paper runtime has a fail-closed safety gate. It rejects proposals when the
+kill switch is halted, the market-data timestamp is missing or lacks a
+timezone, the data is stale, the timestamp is implausibly far in the future,
+or the safety configuration is invalid. The default is deliberately halted.
+
+To run a deliberate paper simulation with the default two-hour freshness
+limit:
+
 ```bash
-python -m app.run_paper_bot
+PAPER_KILL_SWITCH=armed python -m app.run_paper_bot
 ```
+
+The journal records the market-data timestamps, data age, switch state, and
+gate decision. This gate can authorize only the paper simulator; it does not
+change `LIVE_TRADING_ENABLED=false` or create a live signing path.
+
+### Persistent Paper Risk Accounting
+
+The paper risk engine stores its high-water mark, UTC daily starting value,
+last marked portfolio value, and update time in
+`data/paper_risk_state.json`. Each cycle values USDC plus ETH at the proposal's
+verified reference price, so the daily result includes realized and unrealized
+mark-to-market changes. At a UTC date rollover, the last verified portfolio
+mark is carried forward as the new day's baseline so an overnight loss is not
+silently discarded.
+
+At a 5% UTC daily loss, new paper BUY positions are blocked while a
+risk-reducing SELL remains available. At a 20% drawdown from the persistent
+high-water mark, all paper execution halts. State writes are atomic; corrupted,
+unsupported, clock-rollback, or unwritable state fails closed. These controls
+exercise the mandate in simulation only and are not evidence of live-path
+readiness.
 
 ## Seven-Day Trending Token Trial
 
@@ -118,10 +214,13 @@ pool-age, and momentum filters are not a complete token security audit.
 ## Project Status
 
 The live mandate and treasury identity are recorded, but execution remains
-disabled. The current runtime can research, paper trade, and read the public
-treasury balance; it cannot yet submit unattended live orders. The next
-milestone is an always-on Railway Hobby deployment with enforceable accounting,
-risk controls, audit records, stale-data protection, and a kill switch.
+disabled. The current runtime can research, paper trade, read the public
+treasury balance, and deterministically evaluate and journal structured trade
+intents in shadow mode. It cannot construct, sign, approve, or submit live
+orders. The next milestone is connecting a verified live portfolio reader to
+this policy layer and independently testing an emergency stop and a bounded,
+permissioned signing adapter without weakening replay, audit, freshness, or
+risk controls. Any live canary remains a separate activation gate.
 
 ## Disclaimer
 

@@ -38,10 +38,29 @@ def run_paper_bot() -> None:
         risk_approved=risk_decision.approved,
         risk_reason=risk_decision.reason,
         order_status=order_result,
+        market_data_observed_at=proposal.market_data_observed_at,
+        market_data_received_at=proposal.market_data_received_at,
+        safety_gate_allowed=risk_decision.safety_gate_allowed,
+        safety_gate_reason=risk_decision.safety_gate_reason,
+        kill_switch_state=risk_decision.kill_switch_state,
+        market_data_age_seconds=risk_decision.market_data_age_seconds,
+        accounting_ready=risk_decision.accounting_ready,
+        accounting_reason=risk_decision.accounting_reason,
+        portfolio_value=risk_decision.portfolio_value,
+        high_water_mark=risk_decision.high_water_mark,
+        daily_start_value=risk_decision.daily_start_value,
+        drawdown_percent=risk_decision.drawdown_percent,
+        daily_loss_percent=risk_decision.daily_loss_percent,
+        accounting_date=risk_decision.accounting_date,
     )
 
     print(f"Signal: {proposal.signal.value}")
     print(f"Reference price: ${proposal.reference_price:,.2f}")
+    print(f"Paper kill switch: {risk_decision.kill_switch_state}")
+    print(f"Safety gate: {risk_decision.safety_gate_reason}")
+    print(f"Risk accounting: {risk_decision.accounting_reason}")
+    print(f"Drawdown: {risk_decision.drawdown_percent}%")
+    print(f"Daily loss: {risk_decision.daily_loss_percent}%")
     print(f"Risk decision: {risk_decision.reason}")
     print(f"Simulated amount: ${simulated_amount:,.2f}")
     print(f"Simulated ETH quantity: {simulated_quantity}")

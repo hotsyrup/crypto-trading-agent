@@ -1,8 +1,13 @@
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
-from app.market_data import get_eth_usd_price, get_recent_closing_prices
+from app.market_data import (
+    get_eth_usd_price,
+    get_recent_closing_prices,
+    get_recent_closing_prices_snapshot,
+)
 
 
 class MarketDataTests(unittest.TestCase):
@@ -26,6 +31,25 @@ class MarketDataTests(unittest.TestCase):
             get_recent_closing_prices(limit=3),
             [Decimal("300"), Decimal("400"), Decimal("500")],
         )
+
+    @patch("app.market_data.get_json")
+    def test_snapshot_preserves_latest_market_timestamp(
+        self,
+        mock_get_json,
+    ) -> None:
+        mock_get_json.return_value = [
+            [100, 0, 0, 0, "100", 0],
+            [200, 0, 0, 0, "200", 0],
+        ]
+
+        snapshot = get_recent_closing_prices_snapshot()
+
+        self.assertEqual(snapshot.closing_prices, (Decimal("100"), Decimal("200")))
+        self.assertEqual(
+            snapshot.latest_observed_at,
+            datetime.fromtimestamp(200, tz=timezone.utc),
+        )
+        self.assertIsNotNone(snapshot.received_at.tzinfo)
 
 
 if __name__ == "__main__":

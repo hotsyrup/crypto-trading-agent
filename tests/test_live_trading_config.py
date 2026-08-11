@@ -3,7 +3,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
-from app.live_trading_config import load_live_trading_config
+from app.live_trading_config import BASE_USDC_ADDRESS, load_live_trading_config
 
 
 class LiveTradingConfigTests(unittest.TestCase):
@@ -13,6 +13,10 @@ class LiveTradingConfigTests(unittest.TestCase):
 
         self.assertFalse(config.enabled)
         self.assertEqual(config.approved_assets, frozenset({"USDC", "ETH"}))
+        self.assertEqual(
+            config.approved_erc20_contracts,
+            frozenset({BASE_USDC_ADDRESS}),
+        )
         self.assertEqual(config.max_position_percent, Decimal("20"))
         self.assertEqual(config.max_new_strategy_percent, Decimal("5"))
         self.assertEqual(config.max_daily_loss_percent, Decimal("5"))
@@ -34,6 +38,28 @@ class LiveTradingConfigTests(unittest.TestCase):
         }
         with patch.dict(os.environ, environment, clear=True):
             with self.assertRaisesRegex(ValueError, "cannot exceed"):
+                load_live_trading_config()
+
+    def test_rejects_spoofed_or_unreviewed_token_contract(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LIVE_APPROVED_ERC20_CONTRACTS": (
+                    BASE_USDC_ADDRESS + ",0x" + "1" * 40
+                )
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "require amendment"):
+                load_live_trading_config()
+
+    def test_rejects_usdc_without_exact_base_contract(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"LIVE_APPROVED_ERC20_CONTRACTS": ""},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "exact approved contract"):
                 load_live_trading_config()
 
 
