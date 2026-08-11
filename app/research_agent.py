@@ -284,6 +284,36 @@ def store_packets(database_path: Path, packets: list[dict[str, object]]) -> int:
         return connection.total_changes - before
 
 
+def load_latest_packets(
+    database_path: Path,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Read recent public packets without creating or modifying the database."""
+    if not 1 <= limit <= 50:
+        raise ValueError("Research packet read limit must be between 1 and 50.")
+    if not database_path.exists():
+        return []
+    with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM research_packets
+            ORDER BY received_at DESC, packet_id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    current_time = now or _utc_now()
+    packets = []
+    for (payload_json,) in rows:
+        packet = json.loads(payload_json)
+        expires_at = datetime.fromisoformat(str(packet["expires_at"]))
+        packet["is_stale"] = expires_at <= current_time
+        packets.append(packet)
+    return packets
+
+
 def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     if os.getenv("RESEARCH_MODE", "observation_only").strip().lower() != "observation_only":
         raise ValueError("RESEARCH_MODE must remain observation_only.")
@@ -361,10 +391,22 @@ def public_health_state() -> dict[str, object]:
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path not in {"/", "/health"}:
+        if self.path in {"/", "/health"}:
+            response = public_health_state()
+        elif self.path == "/research/latest":
+            *_, database_path, _ = load_config()
+            response = {
+                "service": "lumen-base-research-agent",
+                "schema_version": 1,
+                "mode": "observation_only",
+                "execution": "disabled",
+                "generated_at": _utc_now().isoformat(),
+                "packets": load_latest_packets(database_path),
+            }
+        else:
             self.send_error(404)
             return
-        payload = json.dumps(public_health_state()).encode()
+        payload = json.dumps(response).encode()
         self.send_response(200 if STATE["status"] != "failed" else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")

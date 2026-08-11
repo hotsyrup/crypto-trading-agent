@@ -11,6 +11,7 @@ from unittest.mock import patch
 from app.research_agent import (
     build_packet,
     discover_base_contracts,
+    load_latest_packets,
     load_config,
     public_health_state,
     select_primary_pair,
@@ -139,6 +140,35 @@ class ResearchAgentTests(unittest.TestCase):
                     "SELECT payload_json FROM research_packets"
                 ).fetchone()[0]
         self.assertEqual(json.loads(stored)["packet_id"], packet["packet_id"])
+
+    def test_latest_packet_reader_marks_expired_data_stale(self) -> None:
+        packet = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.sqlite3"
+            store_packets(path, [packet])
+            latest = load_latest_packets(
+                path,
+                now=datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+            )
+        self.assertEqual(len(latest), 1)
+        self.assertTrue(latest[0]["is_stale"])
+        self.assertFalse(latest[0]["execution_authorized"])
+
+    def test_latest_packet_reader_does_not_create_missing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.sqlite3"
+            self.assertEqual(load_latest_packets(path), [])
+            self.assertFalse(path.exists())
 
     def test_public_health_exposes_provider_and_execution_boundaries(self) -> None:
         health = public_health_state()

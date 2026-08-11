@@ -226,6 +226,12 @@ Run the long-lived worker and health endpoint:
 python -m app.research_agent
 ```
 
+The service exposes two read-only endpoints:
+
+* `/health` reports provider and execution-boundary status.
+* `/research/latest` returns the latest public research packets and marks
+  expired packets with `is_stale=true`.
+
 For a second Railway service, select `/railway.research.json` as its custom
 config-as-code file and `Dockerfile.research` as its Dockerfile. Attach a
 volume at `/app/data` if the research history must survive deployments. The
