@@ -203,6 +203,37 @@ workflow is merged into the default branch.
 This scanner is suitable for a paper experiment only. Its liquidity, volume,
 pool-age, and momentum filters are not a complete token security audit.
 
+## Free Railway Research Agent
+
+The separate research worker reads recent Base token profiles and market data
+from DEX Screener's public API, normalizes the results into expiring research
+packets, and stores them in SQLite. Every packet is marked `OBSERVE_ONLY`,
+records source limitations, and explicitly denies execution authority. Token
+profiles are discovery leads, not endorsements; they may reflect project
+marketing, and the worker does not claim to verify contract safety or holder
+concentration. The default watchlist guarantees coverage of Base WETH and
+USDC even when the latest-profile feeds contain no Base projects.
+
+Run one local cycle:
+
+```bash
+python -c 'from app.research_agent import run_research_cycle; run_research_cycle()'
+```
+
+Run the long-lived worker and health endpoint:
+
+```bash
+python -m app.research_agent
+```
+
+For a second Railway service, select `/railway.research.json` as its custom
+config-as-code file and `Dockerfile.research` as its Dockerfile. Attach a
+volume at `/app/data` if the research history must survive deployments. The
+free configuration requires `RESEARCH_MODE=observation_only`,
+`LIVE_TRADING_ENABLED=false`, `AIXBT_ENABLED=false`, and
+`BANKR_ENABLED=false`; it fails closed if any paid or execution flag is
+enabled. No API key or wallet funding is required.
+
 ## Security
 
 * Never store private keys, seed phrases, API secrets, or passwords in this repository
