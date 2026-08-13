@@ -218,7 +218,7 @@ class ShadowMonitorTests(unittest.TestCase):
         self.assertEqual(client_address, ("127.0.0.1", 12345))
         request.settimeout.assert_called_once_with(5.0)
 
-    def test_default_boundary_is_monitoring_only(self):
+    def test_default_boundary_is_monitoring_only(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(validate_execution_boundary(), 3600)
 
