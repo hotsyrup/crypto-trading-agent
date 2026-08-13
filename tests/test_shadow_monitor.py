@@ -122,14 +122,19 @@ class ShadowMonitorTests(unittest.TestCase):
 
     @patch("app.shadow_monitor.send_daily_report")
     @patch("app.shadow_monitor.report_is_due", return_value=False)
+    @patch("app.shadow_monitor.load_research_evidence")
     @patch("app.shadow_monitor.record_decision")
     @patch("app.shadow_monitor.evaluate_portfolio_risk")
     @patch("app.shadow_monitor.load_portfolio")
     @patch("app.shadow_monitor.evaluate_safety_gate")
     @patch("app.shadow_monitor.create_trade_proposal")
     def test_cycle_does_not_report_when_not_due(
-        self, proposal, safety_gate, load, accounting, record, due, send
+        self, proposal, safety_gate, load, accounting, record, research, due, send
     ) -> None:
+        research.return_value.ready = False
+        research.return_value.reason = "Research blocked."
+        research.return_value.packet_ids = ()
+        research.return_value.age_seconds = None
         proposal.return_value.signal.value = "HOLD"
         proposal.return_value.reference_price = 1
         proposal.return_value.maximum_risk = 0
@@ -155,14 +160,19 @@ class ShadowMonitorTests(unittest.TestCase):
 
     @patch("app.shadow_monitor.send_daily_report", side_effect=RuntimeError("offline"))
     @patch("app.shadow_monitor.report_is_due", return_value=True)
+    @patch("app.shadow_monitor.load_research_evidence")
     @patch("app.shadow_monitor.record_decision")
     @patch("app.shadow_monitor.evaluate_portfolio_risk")
     @patch("app.shadow_monitor.load_portfolio")
     @patch("app.shadow_monitor.evaluate_safety_gate")
     @patch("app.shadow_monitor.create_trade_proposal")
     def test_reporting_failure_does_not_fail_monitor(
-        self, proposal, safety_gate, load, accounting, record, due, send
+        self, proposal, safety_gate, load, accounting, record, research, due, send
     ) -> None:
+        research.return_value.ready = True
+        research.return_value.reason = "Research passed."
+        research.return_value.packet_ids = ("a" * 64, "b" * 64)
+        research.return_value.age_seconds = 30
         proposal.return_value.signal.value = "HOLD"
         proposal.return_value.reference_price = 1
         proposal.return_value.maximum_risk = 0

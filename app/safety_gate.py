@@ -71,13 +71,6 @@ def evaluate_safety_gate(
             kill_switch_state=KILL_SWITCH_HALTED,
         )
 
-    if kill_switch_state != KILL_SWITCH_ARMED:
-        return SafetyGateDecision(
-            allowed=False,
-            reason="Paper kill switch is halted.",
-            kill_switch_state=kill_switch_state,
-        )
-
     if proposal.market_data_observed_at is None:
         return SafetyGateDecision(
             allowed=False,
@@ -102,6 +95,13 @@ def evaluate_safety_gate(
     age_seconds = int(
         (current_time - proposal.market_data_observed_at).total_seconds()
     )
+    if kill_switch_state != KILL_SWITCH_ARMED:
+        return SafetyGateDecision(
+            allowed=False,
+            reason="Paper kill switch is halted.",
+            kill_switch_state=kill_switch_state,
+            market_data_age_seconds=age_seconds,
+        )
     if age_seconds < -future_skew:
         return SafetyGateDecision(
             allowed=False,

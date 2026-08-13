@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from app.live_trading_config import load_live_trading_config
 from app.paper_portfolio import load_portfolio
 from app.risk_accounting import evaluate_portfolio_risk
+from app.research_feed import load_research_evidence
 from app.safety_gate import evaluate_safety_gate
 from app.telegram_reporter import report_is_due, send_daily_report
 from app.trade_journal import record_decision
@@ -47,6 +48,7 @@ def validate_execution_boundary() -> int:
 
 def run_shadow_cycle() -> None:
     proposal = create_trade_proposal()
+    research = load_research_evidence()
     safety_gate = evaluate_safety_gate(proposal)
     accounting = evaluate_portfolio_risk(
         load_portfolio(),
@@ -111,6 +113,11 @@ def run_shadow_cycle() -> None:
             if accounting.daily_loss_percent is not None
             else None
         ),
+        research_status="ready" if research.ready else "blocked",
+        research_reason=research.reason,
+        research_packet_ids=list(research.packet_ids),
+        research_age_seconds=research.age_seconds,
+        paper_eligible=(safety_gate.allowed and accounting.ready and research.ready),
     )
     print(json.dumps(STATE), flush=True)
 
