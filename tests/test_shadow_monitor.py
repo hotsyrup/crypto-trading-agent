@@ -60,6 +60,11 @@ class ShadowMonitorTests(unittest.TestCase):
         return proposal, research, safety, accounting
 
     def ledger_result(self, *, eligible, simulated, status="BLOCKED", duplicate=False):
+        portfolio_after = (
+            {"usdc_balance": "9949.975", "eth_balance": "0.024975"}
+            if simulated
+            else {"usdc_balance": "10000", "eth_balance": "0"}
+        )
         entry = {
             "sequence": 1,
             "entry_hash": "c" * 64,
@@ -67,6 +72,9 @@ class ShadowMonitorTests(unittest.TestCase):
             "simulated": simulated,
             "blocked_reason": "" if eligible else "blocked",
             "order": {"status": status},
+            "portfolio_after": portfolio_after,
+            "simulated_value_after": "9999.975" if simulated else "10000",
+            "simulated_pnl_after": "-0.025" if simulated else "0",
         }
         summary = {
             "credited_cycles": int(eligible),
