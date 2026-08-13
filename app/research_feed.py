@@ -21,6 +21,7 @@ WETH_CONTRACT = "0x4200000000000000000000000000000000000006"
 USDC_CONTRACT = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 REQUIRED_CONTRACTS = {WETH_CONTRACT, USDC_CONTRACT}
 EXPECTED_SYMBOLS = {WETH_CONTRACT: "WETH", USDC_CONTRACT: "USDC"}
+EXPECTED_NAMES = {WETH_CONTRACT: "Wrapped Ether", USDC_CONTRACT: "USD Coin"}
 APPROVED_MARKETS = {
     WETH_CONTRACT: (
         "pancakeswap",
@@ -31,7 +32,7 @@ APPROVED_MARKETS = {
         "0x5d0bc342178c8fe2c2f9a9fcc9d52555c99936db",
     ),
 }
-ALLOWED_WARNINGS = {
+REQUIRED_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
     "DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
@@ -50,6 +51,7 @@ REQUIRED_METRICS = {
 PACKET_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 ADDRESS_PATTERN = re.compile(r"^0x[0-9a-f]{40}$")
 MAX_PACKET_LIFETIME = timedelta(minutes=120)
+MIN_PACKET_LIFETIME = timedelta(minutes=5)
 MAX_GENERATED_AGE = timedelta(minutes=10)
 MAX_FUTURE_SKEW = timedelta(seconds=30)
 
@@ -167,7 +169,7 @@ def _validate_packet(
     warnings = packet.get("warnings")
     approved_dex, approved_pair = APPROVED_MARKETS[contract]
 
-    if packet.get("schema_version") != 1:
+    if type(packet.get("schema_version")) is not int or packet.get("schema_version") != 1:
         raise ValueError("packet schema is not approved")
     if not PACKET_ID_PATTERN.fullmatch(packet_id) or packet_id != _packet_digest(packet):
         raise ValueError("packet digest does not match its contents")
@@ -178,6 +180,8 @@ def _validate_packet(
         raise ValueError("network or contract identity is invalid")
     if packet.get("symbol") != EXPECTED_SYMBOLS[contract]:
         raise ValueError("token symbol does not match the approved contract")
+    if packet.get("name") != EXPECTED_NAMES[contract]:
+        raise ValueError("token name does not match the approved contract")
     if packet.get("dex_id") != approved_dex:
         raise ValueError("DEX is not approved for this research market")
     pair_address = str(packet.get("pair_address", "")).lower()
@@ -191,9 +195,10 @@ def _validate_packet(
         raise ValueError("research provider or discovery source is not approved")
     if packet.get("data_quality") != "complete":
         raise ValueError("data_quality must be complete")
-    if not isinstance(warnings, list) or any(
-        not isinstance(warning, str) or warning not in ALLOWED_WARNINGS
-        for warning in warnings
+    if (
+        not isinstance(warnings, list)
+        or any(not isinstance(warning, str) for warning in warnings)
+        or warnings != sorted(REQUIRED_WARNINGS)
     ):
         raise ValueError("packet contains a disallowed warning")
     if (
@@ -201,13 +206,14 @@ def _validate_packet(
         or packet.get("execution_authorized") is not False
     ):
         raise ValueError("research attempted to exceed observation-only authority")
-    if packet.get("is_stale") is True:
-        raise ValueError("packet is marked stale")
+    if packet.get("is_stale") is not False:
+        raise ValueError("packet staleness state is invalid")
     if received_at > current_time + MAX_FUTURE_SKEW or received_at > generated_at + MAX_FUTURE_SKEW:
         raise ValueError("packet receipt time is in the future")
     if expires_at <= current_time:
         raise ValueError("packet has expired")
-    if expires_at <= received_at or expires_at - received_at > MAX_PACKET_LIFETIME:
+    lifetime = expires_at - received_at
+    if lifetime < MIN_PACKET_LIFETIME or lifetime > MAX_PACKET_LIFETIME:
         raise ValueError("packet lifetime is outside the approved bound")
     _validate_metrics(contract, packet.get("metrics"), received_at=received_at)
     return packet_id, received_at
@@ -238,6 +244,7 @@ def evaluate_research_payload(
         return ResearchEvidence(False, "Research response is not an object.")
     if (
         payload.get("service") != "lumen-base-research-agent"
+        or type(payload.get("schema_version")) is not int
         or payload.get("schema_version") != 1
         or payload.get("mode") != "observation_only"
         or payload.get("execution") != "disabled"
@@ -266,12 +273,27 @@ def evaluate_research_payload(
         if not candidates:
             return ResearchEvidence(False, f"Current {EXPECTED_SYMBOLS[contract]} packet is missing.")
         try:
-            selected[contract] = max(
-                candidates,
-                key=lambda packet: _aware_timestamp(packet.get("received_at"), "received_at"),
-            )
+            received_candidates = [
+                (
+                    _aware_timestamp(packet.get("received_at"), "received_at"),
+                    packet,
+                )
+                for packet in candidates
+            ]
         except ValueError as error:
             return ResearchEvidence(False, str(error))
+        newest_time = max(received_at for received_at, _ in received_candidates)
+        newest_packets = [
+            packet
+            for received_at, packet in received_candidates
+            if received_at == newest_time
+        ]
+        if len({_packet_digest(packet) for packet in newest_packets}) != 1:
+            return ResearchEvidence(
+                False,
+                f"Current {EXPECTED_SYMBOLS[contract]} packet is ambiguous.",
+            )
+        selected[contract] = newest_packets[0]
 
     accepted: dict[str, tuple[str, datetime]] = {}
     for contract, packet in selected.items():
@@ -289,12 +311,13 @@ def evaluate_research_payload(
             )
 
     newest = max(received_at for _, received_at in accepted.values())
+    oldest = min(received_at for _, received_at in accepted.values())
     return ResearchEvidence(
         True,
         "Fresh authenticated observation-only research evidence passed.",
         tuple(sorted(packet_id for packet_id, _ in accepted.values())),
         newest,
-        max(int((current_time - newest).total_seconds()), 0),
+        max(int((current_time - oldest).total_seconds()), 0),
         tuple("complete" for _ in accepted),
     )
 

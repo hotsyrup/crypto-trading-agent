@@ -38,6 +38,19 @@ def _entry_hash(entry: dict[str, object]) -> str:
     return hashlib.sha256(_canonical(unsigned).encode()).hexdigest()
 
 
+def _cycle_fingerprint(payload: dict[str, object]) -> str:
+    excluded = {
+        "schema_version",
+        "sequence",
+        "previous_hash",
+        "entry_hash",
+        "acceptance",
+        "cycle_fingerprint",
+    }
+    body = {key: value for key, value in payload.items() if key not in excluded}
+    return hashlib.sha256(_canonical(body).encode()).hexdigest()
+
+
 def _portfolio(payload: object, field: str) -> tuple[Decimal, Decimal]:
     if not isinstance(payload, dict):
         raise ValueError(f"Ledger {field} must be an object.")
@@ -78,6 +91,9 @@ def _load_unlocked() -> list[dict[str, Any]]:
                 raise ValueError("Paper cycle ledger hash chain is invalid.")
             if entry.get("entry_hash") != _entry_hash(entry):
                 raise ValueError("Paper cycle ledger entry hash is invalid.")
+            fingerprint = entry.get("cycle_fingerprint")
+            if fingerprint is not None and fingerprint != _cycle_fingerprint(entry):
+                raise ValueError("Paper cycle ledger fingerprint is invalid.")
             cycle_id = str(entry.get("cycle_id", ""))
             if len(cycle_id) != 64 or cycle_id in cycle_ids:
                 raise ValueError("Paper cycle ledger contains an invalid duplicate cycle ID.")
@@ -186,6 +202,7 @@ def commit_cycle(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, 
     signal_id = str(payload.get("signal_id", ""))
     if len(cycle_id) != 64 or cycle_id != signal_id:
         raise ValueError("Cycle and signal IDs must be the same stable SHA-256 value.")
+    supplied_fingerprint = _cycle_fingerprint(payload)
     LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_PATH.open("a+", encoding="utf-8") as lock_handle:
@@ -193,6 +210,13 @@ def commit_cycle(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, 
         records = _load_unlocked()
         for record in records:
             if record["cycle_id"] == cycle_id:
+                recorded_fingerprint = str(
+                    record.get("cycle_fingerprint") or _cycle_fingerprint(record)
+                )
+                if recorded_fingerprint != supplied_fingerprint:
+                    raise LedgerConflictError(
+                        "Duplicate signal ID was reused with different cycle evidence."
+                    )
                 return record, _acceptance_summary(records, now=datetime.now(timezone.utc)), True
 
         expected_before = (
@@ -212,6 +236,7 @@ def commit_cycle(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, 
             "sequence": len(records) + 1,
             "previous_hash": records[-1]["entry_hash"] if records else "0" * 64,
             **payload,
+            "cycle_fingerprint": supplied_fingerprint,
         }
         prospective = records + [entry]
         entry["acceptance"] = _acceptance_summary(

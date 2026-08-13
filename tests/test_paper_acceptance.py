@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from app.paper_acceptance import acceptance_credit_enabled
+from app.paper_acceptance import acceptance_credit_enabled, legacy_progress_status
 from app.paper_cycle_ledger import (
     LedgerConflictError,
     commit_cycle,
@@ -60,14 +60,41 @@ class PaperAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             ledger_patch, lock_patch = self.paths(directory)
             with ledger_patch, lock_patch:
-                first, _, first_duplicate = commit_cycle(self.payload(1))
-                second, summary, second_duplicate = commit_cycle(self.payload(1))
+                payload = self.payload(1)
+                first, _, first_duplicate = commit_cycle(payload)
+                second, summary, second_duplicate = commit_cycle(payload)
                 records = read_ledger()
         self.assertFalse(first_duplicate)
         self.assertTrue(second_duplicate)
         self.assertEqual(first["entry_hash"], second["entry_hash"])
         self.assertEqual(len(records), 1)
         self.assertEqual(summary["unique_eligible_signals"], 1)
+
+    def test_duplicate_signal_with_changed_evidence_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_patch, lock_patch = self.paths(directory)
+            with ledger_patch, lock_patch:
+                first = self.payload(1)
+                commit_cycle(first)
+                changed = self.payload(1)
+                changed["blocked_reason"] = "different research evidence"
+                with self.assertRaisesRegex(LedgerConflictError, "different cycle evidence"):
+                    commit_cycle(changed)
+
+    def test_legacy_progress_is_hashed_and_never_read_for_credit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paper_acceptance.json"
+            path.write_text(
+                '{"cycles":12,"eligible_cycles":8,"simulated_orders":7}',
+                encoding="utf-8",
+            )
+            with patch("app.paper_acceptance.LEGACY_ACCEPTANCE_PATH", path):
+                status = legacy_progress_status()
+
+        self.assertTrue(status["present"])
+        self.assertFalse(status["read_for_credit"])
+        self.assertEqual(status["reported_eligible_cycles"], 8)
+        self.assertEqual(len(status["sha256"]), 64)
 
     def test_portfolio_continuity_rejects_stale_concurrent_cycle(self):
         with tempfile.TemporaryDirectory() as directory:

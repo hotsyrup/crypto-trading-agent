@@ -186,16 +186,19 @@ readiness.
 ### Corrected Paper Acceptance Ledger
 
 The pre-fix elapsed-time acceptance file is preserved only as invalidated
-historical evidence and is never read for readiness credit. Corrected credit
-defaults to frozen with `PAPER_ACCEPTANCE_CREDIT_ENABLED=false`.
+historical evidence and is never read for readiness credit. Its SHA-256 and
+reported counters are retained in the operator status for reconciliation.
+Corrected credit defaults to frozen with
+`PAPER_ACCEPTANCE_CREDIT_ENABLED=false`.
 
 Every paper cycle is committed to
 `data/paper_cycle_ledger_v2.jsonl`, an append-only SHA-256 hash chain protected
 by a process-shared file lock and a stable signal ID. Duplicate retries return
-the original outcome without changing balances or counters; conflicting stale
-portfolio writes fail closed. The ledger, rather than the legacy portfolio
-file, is the source of truth for simulated balances, costs, P&L, eligibility,
-and acceptance progress after restart.
+the original outcome without changing balances or counters; reuse of a signal
+ID with different evidence and conflicting stale portfolio writes fail closed.
+The ledger, rather than the legacy portfolio file, is the source of truth for
+simulated balances, costs, P&L, eligibility, and acceptance progress after
+restart.
 
 Acceptance can complete only after either 50 unique eligible signal IDs or
 seven consecutive completed qualifying UTC days. A qualifying day requires at

@@ -95,6 +95,17 @@ class ResearchFeedTests(unittest.TestCase):
         )
         self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
 
+    def test_missing_or_reordered_advisory_warnings_fail_closed(self):
+        changes = (
+            lambda packet: packet["warnings"].pop(),
+            lambda packet: packet["warnings"].reverse(),
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                payload = self.payload()
+                self.mutate(payload, WETH_CONTRACT, change)
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
     def test_forged_packet_id_fails_closed(self):
         payload = self.payload()
         payload["packets"][0]["packet_id"] = "f" * 64
@@ -107,6 +118,7 @@ class ResearchFeedTests(unittest.TestCase):
             lambda packet: packet["source"].update(provider="unknown"),
             lambda packet: packet.update(pair_address="0x" + "1" * 40),
             lambda packet: packet.update(dex_id="unknown"),
+            lambda packet: packet.update(name="Copied Ether"),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -136,6 +148,7 @@ class ResearchFeedTests(unittest.TestCase):
             lambda packet: packet.update(expires_at=(self.now - timedelta(seconds=1)).isoformat()),
             lambda packet: packet.update(received_at=(self.now + timedelta(minutes=2)).isoformat()),
             lambda packet: packet.update(expires_at=(self.now + timedelta(hours=3)).isoformat()),
+            lambda packet: packet.update(expires_at=(self.now + timedelta(minutes=1)).isoformat()),
         )
         for change in changes:
             with self.subTest(change=change):
@@ -156,6 +169,38 @@ class ResearchFeedTests(unittest.TestCase):
             lambda packet: packet.update(execution_authorized=True),
         )
         self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_missing_staleness_state_and_boolean_schema_fail_closed(self):
+        payload = self.payload()
+        self.mutate(payload, WETH_CONTRACT, lambda packet: packet.pop("is_stale"))
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+        payload = self.payload()
+        payload["schema_version"] = True
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_ambiguous_latest_packet_fails_closed(self):
+        payload = self.payload()
+        duplicate = deepcopy(payload["packets"][0])
+        duplicate["metrics"]["price_usd"] = "2100"
+        duplicate["packet_id"] = _packet_digest(duplicate)
+        payload["packets"].append(duplicate)
+        decision = evaluate_research_payload(payload, now=self.now)
+        self.assertFalse(decision.ready)
+        self.assertIn("ambiguous", decision.reason)
+
+    def test_reported_age_uses_oldest_required_packet(self):
+        payload = self.payload()
+        self.mutate(
+            payload,
+            WETH_CONTRACT,
+            lambda packet: packet.update(
+                received_at=(self.now - timedelta(seconds=90)).isoformat()
+            ),
+        )
+        decision = evaluate_research_payload(payload, now=self.now)
+        self.assertTrue(decision.ready, decision.reason)
+        self.assertEqual(decision.age_seconds, 90)
 
     def test_input_is_not_mutated(self):
         payload = self.payload()
