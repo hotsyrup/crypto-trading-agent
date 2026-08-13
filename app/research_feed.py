@@ -18,6 +18,14 @@ REQUIRED_CONTRACTS = {
     "0x4200000000000000000000000000000000000006",  # WETH
     "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC
 }
+CRITICAL_METRICS = {
+    "price_usd",
+    "liquidity_usd",
+    "volume_h24_usd",
+    "pair_created_at",
+    "buys_h24",
+    "sells_h24",
+}
 
 
 @dataclass(frozen=True)
@@ -85,12 +93,16 @@ def evaluate_research_payload(
         except ValueError:
             continue
         packet_id = str(packet.get("packet_id", ""))
+        metrics = packet.get("metrics")
+        critical_metrics_present = isinstance(metrics, dict) and all(
+            metrics.get(field) is not None for field in CRITICAL_METRICS
+        )
         if (
             len(packet_id) != 64
             or packet.get("network") != "base"
             or packet.get("recommendation") != "OBSERVE_ONLY"
             or packet.get("execution_authorized") is not False
-            or packet.get("data_quality") != "complete"
+            or not critical_metrics_present
             or packet.get("is_stale") is True
             or expires_at <= current_time
             or received_at > current_time
@@ -102,7 +114,7 @@ def evaluate_research_payload(
     if missing:
         return ResearchEvidence(
             False,
-            "Fresh complete WETH and USDC research evidence is required.",
+            "Fresh WETH and USDC research with all critical metrics is required.",
         )
     newest = max(received_at for _, received_at in accepted.values())
     return ResearchEvidence(

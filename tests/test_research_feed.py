@@ -18,6 +18,14 @@ class ResearchFeedTests(unittest.TestCase):
                     "received_at": (self.now - timedelta(seconds=30)).isoformat(),
                     "expires_at": (self.now + timedelta(minutes=30)).isoformat(),
                     "data_quality": "complete",
+                    "metrics": {
+                        "price_usd": "1",
+                        "liquidity_usd": "100000",
+                        "volume_h24_usd": "50000",
+                        "pair_created_at": "2025-01-01T00:00:00+00:00",
+                        "buys_h24": 10,
+                        "sells_h24": 10,
+                    },
                     "recommendation": "OBSERVE_ONLY",
                     "execution_authorized": False,
                     "is_stale": False,
@@ -39,9 +47,16 @@ class ResearchFeedTests(unittest.TestCase):
 
     def test_partial_packet_fails_closed(self):
         payload = self.payload()
-        payload["packets"][0]["data_quality"] = "partial"
+        payload["packets"][0]["metrics"]["liquidity_usd"] = None
         decision = evaluate_research_payload(payload, now=self.now)
         self.assertFalse(decision.ready)
+
+    def test_stablecoin_missing_change_percent_can_pass(self):
+        payload = self.payload()
+        payload["packets"][0]["data_quality"] = "partial"
+        payload["packets"][0]["metrics"]["price_change_h24_percent"] = None
+        decision = evaluate_research_payload(payload, now=self.now)
+        self.assertTrue(decision.ready)
 
     def test_stale_packet_fails_closed(self):
         payload = self.payload()
