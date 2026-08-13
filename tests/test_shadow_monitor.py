@@ -8,6 +8,9 @@ from http.client import HTTPConnection
 from unittest.mock import MagicMock, patch
 
 from app.safety_gate import SafetyGateDecision
+from app.paper_execution import PaperOrder
+from app.paper_portfolio import PaperPortfolio
+from app.strategy import Signal
 from app.risk_accounting import RiskAccountingDecision
 from app.shadow_monitor import (
     HealthHandler,
@@ -20,6 +23,83 @@ from app.shadow_monitor import (
 
 
 class ShadowMonitorTests(unittest.TestCase):
+    @patch("app.shadow_monitor.report_is_due", return_value=False)
+    @patch("app.shadow_monitor.update_acceptance")
+    @patch("app.shadow_monitor.save_portfolio")
+    @patch("app.shadow_monitor.apply_order")
+    @patch("app.shadow_monitor.simulate_order")
+    @patch("app.shadow_monitor.record_decision")
+    @patch("app.shadow_monitor.evaluate_portfolio_risk")
+    @patch("app.shadow_monitor.load_portfolio")
+    @patch("app.shadow_monitor.evaluate_safety_gate")
+    @patch("app.shadow_monitor.load_research_evidence")
+    @patch("app.shadow_monitor.create_trade_proposal")
+    def test_eligible_cycle_updates_only_simulated_portfolio(
+        self,
+        proposal,
+        research,
+        safety,
+        load,
+        accounting,
+        record,
+        simulate,
+        apply,
+        save,
+        acceptance,
+        due,
+    ) -> None:
+        proposal.return_value.signal = Signal.BUY
+        proposal.return_value.reference_price = Decimal("2000")
+        proposal.return_value.maximum_risk = Decimal("50")
+        research.return_value.ready = True
+        research.return_value.reason = "Research passed."
+        research.return_value.packet_ids = ("a" * 64, "b" * 64)
+        research.return_value.age_seconds = 20
+        safety.return_value = SafetyGateDecision(
+            allowed=True,
+            reason="Paper safety gate passed.",
+            kill_switch_state="armed",
+            market_data_age_seconds=30,
+        )
+        portfolio = PaperPortfolio(Decimal("10000"), Decimal("0"))
+        updated = PaperPortfolio(Decimal("9949.975"), Decimal("0.024975"))
+        load.return_value = portfolio
+        accounting.return_value = RiskAccountingDecision(
+            ready=True,
+            reason="Portfolio risk accounting passed.",
+            current_value=Decimal("10000"),
+            high_water_mark=Decimal("10000"),
+            daily_start_value=Decimal("10000"),
+            drawdown_percent=Decimal("0"),
+            daily_loss_percent=Decimal("0"),
+            daily_date=date(2026, 8, 12),
+        )
+        simulate.return_value = PaperOrder(
+            Signal.BUY,
+            Decimal("2000"),
+            Decimal("50"),
+            Decimal("0.024975"),
+            "SIMULATED",
+        )
+        apply.return_value = updated
+        acceptance.return_value = {
+            "cycles": 1,
+            "eligible_cycles": 1,
+            "simulated_orders": 1,
+            "complete": False,
+        }
+
+        run_shadow_cycle()
+
+        save.assert_called_once_with(updated)
+        acceptance.assert_called_once_with(
+            eligible=True,
+            simulated=True,
+            blocked_reason="",
+        )
+        self.assertTrue(STATE["paper_eligible"])
+        self.assertEqual(STATE["paper_order_status"], "SIMULATED")
+
     def test_health_endpoint_returns_only_public_fields(self) -> None:
         original_state = STATE.copy()
         self.addCleanup(lambda: (STATE.clear(), STATE.update(original_state)))
@@ -122,6 +202,7 @@ class ShadowMonitorTests(unittest.TestCase):
 
     @patch("app.shadow_monitor.send_daily_report")
     @patch("app.shadow_monitor.report_is_due", return_value=False)
+    @patch("app.shadow_monitor.update_acceptance")
     @patch("app.shadow_monitor.load_research_evidence")
     @patch("app.shadow_monitor.record_decision")
     @patch("app.shadow_monitor.evaluate_portfolio_risk")
@@ -129,8 +210,14 @@ class ShadowMonitorTests(unittest.TestCase):
     @patch("app.shadow_monitor.evaluate_safety_gate")
     @patch("app.shadow_monitor.create_trade_proposal")
     def test_cycle_does_not_report_when_not_due(
-        self, proposal, safety_gate, load, accounting, record, research, due, send
+        self, proposal, safety_gate, load, accounting, record, research, acceptance, due, send
     ) -> None:
+        acceptance.return_value = {
+            "cycles": 1,
+            "eligible_cycles": 0,
+            "simulated_orders": 0,
+            "complete": False,
+        }
         research.return_value.ready = False
         research.return_value.reason = "Research blocked."
         research.return_value.packet_ids = ()
@@ -160,6 +247,7 @@ class ShadowMonitorTests(unittest.TestCase):
 
     @patch("app.shadow_monitor.send_daily_report", side_effect=RuntimeError("offline"))
     @patch("app.shadow_monitor.report_is_due", return_value=True)
+    @patch("app.shadow_monitor.update_acceptance")
     @patch("app.shadow_monitor.load_research_evidence")
     @patch("app.shadow_monitor.record_decision")
     @patch("app.shadow_monitor.evaluate_portfolio_risk")
@@ -167,8 +255,14 @@ class ShadowMonitorTests(unittest.TestCase):
     @patch("app.shadow_monitor.evaluate_safety_gate")
     @patch("app.shadow_monitor.create_trade_proposal")
     def test_reporting_failure_does_not_fail_monitor(
-        self, proposal, safety_gate, load, accounting, record, research, due, send
+        self, proposal, safety_gate, load, accounting, record, research, acceptance, due, send
     ) -> None:
+        acceptance.return_value = {
+            "cycles": 1,
+            "eligible_cycles": 0,
+            "simulated_orders": 0,
+            "complete": False,
+        }
         research.return_value.ready = True
         research.return_value.reason = "Research passed."
         research.return_value.packet_ids = ("a" * 64, "b" * 64)

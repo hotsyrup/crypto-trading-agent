@@ -41,18 +41,22 @@ def apply_order(
         return portfolio
 
     if order.side == Signal.BUY:
-        if order.amount_usdc > portfolio.usdc_balance:
+        total_cost = order.amount_usdc + order.fee_usdc
+        if total_cost > portfolio.usdc_balance:
             raise ValueError("Insufficient simulated USDC balance.")
 
         return PaperPortfolio(
-            usdc_balance=portfolio.usdc_balance - order.amount_usdc,
+            usdc_balance=portfolio.usdc_balance - total_cost,
             eth_balance=portfolio.eth_balance + order.quantity_eth,
         )
 
     if order.quantity_eth > portfolio.eth_balance:
         raise ValueError("Insufficient simulated ETH balance.")
 
-    proceeds = order.quantity_eth * order.reference_price
+    execution_price = order.execution_price or order.reference_price
+    proceeds = order.quantity_eth * execution_price - order.fee_usdc
+    if proceeds < 0:
+        raise ValueError("Simulated costs exceed sale proceeds.")
 
     return PaperPortfolio(
         usdc_balance=portfolio.usdc_balance + proceeds,

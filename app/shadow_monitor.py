@@ -6,13 +6,17 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from app.live_trading_config import load_live_trading_config
+from app.paper_acceptance import update_acceptance
+from app.paper_execution import simulate_order
 from app.paper_portfolio import load_portfolio
+from app.paper_portfolio import apply_order, save_portfolio
 from app.risk_accounting import evaluate_portfolio_risk
 from app.research_feed import load_research_evidence
 from app.safety_gate import evaluate_safety_gate
 from app.telegram_reporter import report_is_due, send_daily_report
 from app.trade_journal import record_decision
 from app.trading_cycle import create_trade_proposal
+from app.strategy import Signal
 
 
 STATE: dict[str, object] = {
@@ -50,9 +54,53 @@ def run_shadow_cycle() -> None:
     proposal = create_trade_proposal()
     research = load_research_evidence()
     safety_gate = evaluate_safety_gate(proposal)
+    portfolio = load_portfolio()
     accounting = evaluate_portfolio_risk(
-        load_portfolio(),
+        portfolio,
         proposal.reference_price,
+    )
+    accounting_allowed = (
+        accounting.ready
+        and not accounting.drawdown_halt
+        and not (accounting.daily_loss_halt and proposal.signal == Signal.BUY)
+    )
+    position_allowed = (
+        (proposal.signal == Signal.BUY and portfolio.eth_balance == 0)
+        or (proposal.signal == Signal.SELL and portfolio.eth_balance > 0)
+    )
+    paper_eligible = (
+        safety_gate.allowed
+        and accounting_allowed
+        and research.ready
+        and position_allowed
+    )
+    simulated = False
+    order_status = "BLOCKED"
+    if paper_eligible:
+        order = simulate_order(proposal)
+        try:
+            updated_portfolio = apply_order(portfolio, order)
+            if updated_portfolio != portfolio:
+                save_portfolio(updated_portfolio)
+                simulated = True
+            order_status = order.status
+        except ValueError as error:
+            paper_eligible = False
+            order_status = f"REJECTED: {error}"
+    blocked_reason = "; ".join(
+        reason
+        for ready, reason in (
+            (safety_gate.allowed, safety_gate.reason),
+            (accounting_allowed, accounting.reason),
+            (research.ready, research.reason),
+            (position_allowed, "Signal is HOLD or does not reduce/open the expected position."),
+        )
+        if not ready
+    ) or (order_status if not paper_eligible else "")
+    acceptance = update_acceptance(
+        eligible=paper_eligible,
+        simulated=simulated,
+        blocked_reason=blocked_reason,
     )
     record_decision(
         signal=proposal.signal,
@@ -117,7 +165,12 @@ def run_shadow_cycle() -> None:
         research_reason=research.reason,
         research_packet_ids=list(research.packet_ids),
         research_age_seconds=research.age_seconds,
-        paper_eligible=(safety_gate.allowed and accounting.ready and research.ready),
+        paper_eligible=paper_eligible,
+        paper_order_status=order_status,
+        paper_acceptance_cycles=acceptance["cycles"],
+        paper_acceptance_eligible_cycles=acceptance["eligible_cycles"],
+        paper_acceptance_simulated_orders=acceptance["simulated_orders"],
+        paper_acceptance_complete=acceptance["complete"],
     )
     print(json.dumps(STATE), flush=True)
 
