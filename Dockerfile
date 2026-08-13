@@ -7,14 +7,18 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt
 RUN useradd --create-home botuser
 
 COPY --chown=botuser:botuser app ./app
+COPY --chown=root:root docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN mkdir /app/data \
-    && chown botuser:botuser /app/data
+    && chown botuser:botuser /app/data \
+    && chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER botuser
-
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "app.shadow_monitor"]
