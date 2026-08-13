@@ -1,74 +1,167 @@
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
-from app.research_feed import REQUIRED_CONTRACTS, evaluate_research_payload
+from app.research_feed import (
+    APPROVED_MARKETS,
+    REQUIRED_CONTRACTS,
+    USDC_CONTRACT,
+    WETH_CONTRACT,
+    _packet_digest,
+    evaluate_research_payload,
+)
 
 
 class ResearchFeedTests(unittest.TestCase):
     now = datetime(2026, 8, 12, 20, 0, tzinfo=timezone.utc)
 
+    def packet(self, contract):
+        dex_id, pair_address = APPROVED_MARKETS[contract]
+        packet = {
+            "schema_version": 1,
+            "network": "base",
+            "contract_address": contract,
+            "symbol": "WETH" if contract == WETH_CONTRACT else "USDC",
+            "name": "Wrapped Ether" if contract == WETH_CONTRACT else "USD Coin",
+            "pair_address": pair_address,
+            "dex_id": dex_id,
+            "received_at": (self.now - timedelta(seconds=30)).isoformat(),
+            "expires_at": (self.now + timedelta(minutes=89)).isoformat(),
+            "source": {
+                "provider": "dexscreener",
+                "discovery": "configured_watchlist",
+                "profile_url": None,
+            },
+            "metrics": {
+                "price_usd": "2000" if contract == WETH_CONTRACT else "1.00",
+                "liquidity_usd": "100000",
+                "volume_h24_usd": "50000",
+                "volume_h6_usd": "10000",
+                "price_change_h24_percent": "1.2",
+                "price_change_h6_percent": "0.2",
+                "pair_created_at": "2025-01-01T00:00:00+00:00",
+                "buys_h24": 10,
+                "sells_h24": 10,
+            },
+            "warnings": [
+                "CONTRACT_SECURITY_NOT_VERIFIED",
+                "DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING",
+                "HOLDER_CONCENTRATION_NOT_VERIFIED",
+            ],
+            "data_quality": "complete",
+            "recommendation": "OBSERVE_ONLY",
+            "execution_authorized": False,
+            "is_stale": False,
+        }
+        packet["packet_id"] = _packet_digest(packet)
+        return packet
+
     def payload(self):
-        packets = []
-        for index, contract in enumerate(sorted(REQUIRED_CONTRACTS)):
-            packets.append(
-                {
-                    "packet_id": str(index + 1) * 64,
-                    "network": "base",
-                    "contract_address": contract,
-                    "received_at": (self.now - timedelta(seconds=30)).isoformat(),
-                    "expires_at": (self.now + timedelta(minutes=30)).isoformat(),
-                    "data_quality": "complete",
-                    "metrics": {
-                        "price_usd": "1",
-                        "liquidity_usd": "100000",
-                        "volume_h24_usd": "50000",
-                        "pair_created_at": "2025-01-01T00:00:00+00:00",
-                        "buys_h24": 10,
-                        "sells_h24": 10,
-                    },
-                    "recommendation": "OBSERVE_ONLY",
-                    "execution_authorized": False,
-                    "is_stale": False,
-                }
-            )
         return {
             "service": "lumen-base-research-agent",
             "schema_version": 1,
             "mode": "observation_only",
             "execution": "disabled",
-            "packets": packets,
+            "generated_at": self.now.isoformat(),
+            "packets": [self.packet(contract) for contract in sorted(REQUIRED_CONTRACTS)],
         }
 
-    def test_fresh_complete_required_packets_pass(self):
+    def mutate(self, payload, contract, change):
+        packet = next(
+            packet for packet in payload["packets"] if packet["contract_address"] == contract
+        )
+        change(packet)
+        packet["packet_id"] = _packet_digest(packet)
+
+    def test_fresh_complete_authenticated_packets_pass(self):
         decision = evaluate_research_payload(self.payload(), now=self.now)
-        self.assertTrue(decision.ready)
+        self.assertTrue(decision.ready, decision.reason)
         self.assertEqual(decision.age_seconds, 30)
-        self.assertEqual(len(decision.packet_ids), 2)
+        self.assertEqual(decision.qualities, ("complete", "complete"))
 
     def test_partial_packet_fails_closed(self):
         payload = self.payload()
-        payload["packets"][0]["metrics"]["liquidity_usd"] = None
+        self.mutate(payload, USDC_CONTRACT, lambda packet: packet.update(data_quality="partial"))
         decision = evaluate_research_payload(payload, now=self.now)
         self.assertFalse(decision.ready)
+        self.assertIn("data_quality", decision.reason)
 
-    def test_stablecoin_missing_change_percent_can_pass(self):
+    def test_incomplete_warning_fails_closed(self):
         payload = self.payload()
-        payload["packets"][0]["data_quality"] = "partial"
-        payload["packets"][0]["metrics"]["price_change_h24_percent"] = None
-        decision = evaluate_research_payload(payload, now=self.now)
-        self.assertTrue(decision.ready)
+        self.mutate(
+            payload,
+            USDC_CONTRACT,
+            lambda packet: packet["warnings"].append("MARKET_FIELDS_INCOMPLETE"),
+        )
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
 
-    def test_stale_packet_fails_closed(self):
+    def test_forged_packet_id_fails_closed(self):
         payload = self.payload()
-        payload["packets"][0]["expires_at"] = (self.now - timedelta(seconds=1)).isoformat()
+        payload["packets"][0]["packet_id"] = "f" * 64
         decision = evaluate_research_payload(payload, now=self.now)
         self.assertFalse(decision.ready)
+        self.assertIn("digest", decision.reason)
+
+    def test_wrong_provider_pair_and_dex_fail_closed(self):
+        mutations = (
+            lambda packet: packet["source"].update(provider="unknown"),
+            lambda packet: packet.update(pair_address="0x" + "1" * 40),
+            lambda packet: packet.update(dex_id="unknown"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                payload = self.payload()
+                self.mutate(payload, WETH_CONTRACT, mutation)
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_nonfinite_and_inconsistent_metrics_fail_closed(self):
+        for field, value in (
+            ("price_usd", "NaN"),
+            ("liquidity_usd", "-1"),
+            ("volume_h6_usd", "999999"),
+        ):
+            with self.subTest(field=field):
+                payload = self.payload()
+                self.mutate(
+                    payload,
+                    WETH_CONTRACT,
+                    lambda packet, field=field, value=value: packet["metrics"].update(
+                        {field: value}
+                    ),
+                )
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_stale_future_and_overlong_packets_fail_closed(self):
+        changes = (
+            lambda packet: packet.update(expires_at=(self.now - timedelta(seconds=1)).isoformat()),
+            lambda packet: packet.update(received_at=(self.now + timedelta(minutes=2)).isoformat()),
+            lambda packet: packet.update(expires_at=(self.now + timedelta(hours=3)).isoformat()),
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                payload = self.payload()
+                self.mutate(payload, WETH_CONTRACT, change)
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_stale_response_generation_fails_closed(self):
+        payload = self.payload()
+        payload["generated_at"] = (self.now - timedelta(minutes=11)).isoformat()
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
 
     def test_execution_authorization_is_rejected(self):
         payload = self.payload()
-        payload["packets"][0]["execution_authorized"] = True
-        decision = evaluate_research_payload(payload, now=self.now)
-        self.assertFalse(decision.ready)
+        self.mutate(
+            payload,
+            WETH_CONTRACT,
+            lambda packet: packet.update(execution_authorized=True),
+        )
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_input_is_not_mutated(self):
+        payload = self.payload()
+        original = deepcopy(payload)
+        evaluate_research_payload(payload, now=self.now)
+        self.assertEqual(payload, original)
 
 
 if __name__ == "__main__":

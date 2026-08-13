@@ -37,3 +37,5 @@ class TelegramReporterTests(unittest.TestCase):
             )
         self.assertIn("Execution: disabled", report)
         self.assertIn("Mode: monitoring_only", report)
+        self.assertIn("PAPER ONLY — NO SIGNER OR LIVE ROUTE", report)
+        self.assertIn("Acceptance credit: False", report)

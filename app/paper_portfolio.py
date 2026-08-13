@@ -18,18 +18,14 @@ class PaperPortfolio:
 
 
 def load_portfolio() -> PaperPortfolio:
-    if not PORTFOLIO_PATH.exists():
-        return PaperPortfolio(
-            usdc_balance=STARTING_BALANCE,
-            eth_balance=Decimal("0"),
-        )
+    # The v2 cycle ledger is authoritative. The legacy portfolio remains on
+    # disk as frozen pre-fix evidence but is never read for new acceptance.
+    from app.paper_cycle_ledger import current_portfolio
 
-    with PORTFOLIO_PATH.open("r", encoding="utf-8") as portfolio_file:
-        data = json.load(portfolio_file)
-
+    usdc_balance, eth_balance = current_portfolio()
     return PaperPortfolio(
-        usdc_balance=Decimal(data["usdc_balance"]),
-        eth_balance=Decimal(data["eth_balance"]),
+        usdc_balance=usdc_balance,
+        eth_balance=eth_balance,
     )
 
 

@@ -170,7 +170,7 @@ change `LIVE_TRADING_ENABLED=false` or create a live signing path.
 
 The paper risk engine stores its high-water mark, UTC daily starting value,
 last marked portfolio value, and update time in
-`data/paper_risk_state.json`. Each cycle values USDC plus ETH at the proposal's
+`data/paper_risk_state_v2.json`. Each cycle values USDC plus ETH at the proposal's
 verified reference price, so the daily result includes realized and unrealized
 mark-to-market changes. At a UTC date rollover, the last verified portfolio
 mark is carried forward as the new day's baseline so an overnight loss is not
@@ -182,6 +182,34 @@ high-water mark, all paper execution halts. State writes are atomic; corrupted,
 unsupported, clock-rollback, or unwritable state fails closed. These controls
 exercise the mandate in simulation only and are not evidence of live-path
 readiness.
+
+### Corrected Paper Acceptance Ledger
+
+The pre-fix elapsed-time acceptance file is preserved only as invalidated
+historical evidence and is never read for readiness credit. Corrected credit
+defaults to frozen with `PAPER_ACCEPTANCE_CREDIT_ENABLED=false`.
+
+Every paper cycle is committed to
+`data/paper_cycle_ledger_v2.jsonl`, an append-only SHA-256 hash chain protected
+by a process-shared file lock and a stable signal ID. Duplicate retries return
+the original outcome without changing balances or counters; conflicting stale
+portfolio writes fail closed. The ledger, rather than the legacy portfolio
+file, is the source of truth for simulated balances, costs, P&L, eligibility,
+and acceptance progress after restart.
+
+Acceptance can complete only after either 50 unique eligible signal IDs or
+seven consecutive completed qualifying UTC days. A qualifying day requires at
+least 20 unique observed cycles, with every cycle passing the research,
+market-freshness, kill-switch, and accounting health boundaries under the
+frozen `eth_usd_sma_3_5` strategy version. A blocked cycle disqualifies that
+day. Enabling corrected acceptance credit requires a separate review and
+authorization; deployment and restart-verification cycles do not count.
+
+The monitor writes a privacy-safe operator report to
+`data/operator_status_v2.json` and emits the same evidence to authenticated
+Railway logs. It includes the deployed commit when Railway supplies it,
+research packet IDs and quality, rejection reasons, simulated outcomes,
+acceptance counters, ledger continuity, and an explicit no-signer boundary.
 
 ## Seven-Day Trending Token Trial
 

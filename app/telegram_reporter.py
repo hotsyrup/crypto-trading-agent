@@ -39,13 +39,25 @@ def format_daily_report(state: dict[str, object], now: datetime) -> str:
         [
             f"Lumen daily cloud report — {local_now:%Y-%m-%d}",
             f"Service: {service} ({environment})",
+            "PAPER ONLY — NO SIGNER OR LIVE ROUTE",
             f"Agent status: {state.get('status', 'unknown')}",
             f"Mode: {state.get('mode', 'monitoring_only')}",
             f"Last cycle: {state.get('last_cycle_at') or 'not completed'}",
+            f"Deployment: {os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unavailable')}",
             f"Observed signal: {state.get('signal', 'none')}",
             f"Reference price: {state.get('reference_price', 'unavailable')}",
+            f"Market age (seconds): {state.get('market_data_age_seconds', 'unavailable')}",
+            f"Research: {state.get('research_status', 'unknown')} — {state.get('research_reason', 'unavailable')}",
+            f"Research packets: {state.get('research_packet_ids', [])}",
+            f"Research age/quality: {state.get('research_age_seconds', 'unavailable')}s / {state.get('research_qualities', [])}",
+            f"Eligibility: {state.get('paper_eligible', False)} — {state.get('paper_blocked_reason') or 'passed'}",
+            f"Paper order: {state.get('paper_order', {'status': 'NONE'})}",
+            f"Simulated value/P&L: {state.get('paper_simulated_value_after', 'unavailable')} / {state.get('paper_simulated_pnl_after', 'unavailable')}",
+            f"Acceptance credit: {state.get('paper_acceptance_credit_enabled', False)}; cycles/signals/days: {state.get('paper_acceptance_credited_cycles', 0)}/{state.get('paper_acceptance_unique_eligible_signals', 0)}/{state.get('paper_acceptance_consecutive_days', 0)}",
+            f"Ledger: sequence {state.get('ledger_sequence', 0)} head {state.get('ledger_head', 'unavailable')}",
             f"Last error: {state.get('last_error') or 'none'}",
             "Execution: disabled; no orders submitted or signed.",
+            "Wallet isolation: no signer, allowance, transfer, refill, fallback, or cross-wallet route.",
         ]
     )
 
