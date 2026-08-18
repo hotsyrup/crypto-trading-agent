@@ -5,12 +5,15 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from app.research_agent import (
     build_packet,
     discover_base_contracts,
+    get_json,
     load_latest_packets,
     load_config,
     public_health_state,
@@ -39,6 +42,31 @@ def sample_pair(liquidity: str = "100000") -> dict[str, object]:
 
 
 class ResearchAgentTests(unittest.TestCase):
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.urlopen")
+    def test_provider_transient_failure_retries_then_recovers(self, urlopen, sleep) -> None:
+        response = BytesIO(b'{"ok": true}')
+        response.headers = {}
+        urlopen.side_effect = [
+            HTTPError("https://api.dexscreener.com/test", 503, "busy", {}, None),
+            URLError("temporary DNS failure"),
+            response,
+        ]
+        self.assertEqual(get_json("/test"), {"ok": True})
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.urlopen")
+    def test_provider_permanent_client_error_does_not_retry(self, urlopen, sleep) -> None:
+        urlopen.side_effect = HTTPError(
+            "https://api.dexscreener.com/test", 404, "missing", {}, None
+        )
+        with self.assertRaises(HTTPError):
+            get_json("/test")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
     def test_default_config_is_free_and_observation_only(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             interval, limit, minimum, freshness, path, watchlist = load_config()

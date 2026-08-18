@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -26,6 +27,8 @@ DEXSCREENER_ORIGIN = "https://api.dexscreener.com"
 ALLOWED_API_HOST = "api.dexscreener.com"
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 MAX_API_CANDIDATES = 30
+MAX_PROVIDER_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 DEFAULT_WATCHLIST = (
     "0x4200000000000000000000000000000000000006",  # WETH on Base
     "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC on Base
@@ -69,8 +72,18 @@ def get_json(path: str) -> object:
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_API_HOST:
         raise ValueError("Only the approved DEX Screener HTTPS host is allowed.")
     request = Request(url, headers={"User-Agent": "lumen-railway-research/1"})
-    with urlopen(request, timeout=10) as response:  # nosec B310
-        return json.load(response)
+    for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=10) as response:  # nosec B310
+                return json.load(response)
+        except HTTPError as error:
+            if error.code not in RETRYABLE_HTTP_STATUS or attempt == MAX_PROVIDER_ATTEMPTS:
+                raise
+        except URLError:
+            if attempt == MAX_PROVIDER_ATTEMPTS:
+                raise
+        time.sleep(attempt)
+    raise RuntimeError("DEX Screener retry loop ended unexpectedly.")
 
 
 def discover_base_contracts(
