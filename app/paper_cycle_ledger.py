@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -39,6 +37,23 @@ def _entry_hash(entry: dict[str, object]) -> str:
 
 
 def _cycle_fingerprint(payload: dict[str, object]) -> str:
+    excluded = {
+        "schema_version",
+        "sequence",
+        "previous_hash",
+        "entry_hash",
+        "acceptance",
+        "cycle_fingerprint",
+        # Attempt timing is not substantive cycle evidence. A retry may be
+        # recorded later while carrying the same immutable market evidence.
+        "recorded_at",
+    }
+    body = {key: value for key, value in payload.items() if key not in excluded}
+    return hashlib.sha256(_canonical(body).encode()).hexdigest()
+
+
+def _legacy_cycle_fingerprint(payload: dict[str, object]) -> str:
+    """Return the pre-retry-fix fingerprint for validating existing entries."""
     excluded = {
         "schema_version",
         "sequence",
@@ -92,7 +107,11 @@ def _load_unlocked() -> list[dict[str, Any]]:
             if entry.get("entry_hash") != _entry_hash(entry):
                 raise ValueError("Paper cycle ledger entry hash is invalid.")
             fingerprint = entry.get("cycle_fingerprint")
-            if fingerprint is not None and fingerprint != _cycle_fingerprint(entry):
+            valid_fingerprints = {
+                _cycle_fingerprint(entry),
+                _legacy_cycle_fingerprint(entry),
+            }
+            if fingerprint is not None and fingerprint not in valid_fingerprints:
                 raise ValueError("Paper cycle ledger fingerprint is invalid.")
             cycle_id = str(entry.get("cycle_id", ""))
             if len(cycle_id) != 64 or cycle_id in cycle_ids:
@@ -194,63 +213,6 @@ def _acceptance_summary(
         "complete": complete,
         "completion_reason": completion_reason,
     }
-
-
-def commit_cycle(payload: dict[str, object]) -> tuple[dict[str, Any], dict[str, object], bool]:
-    """Append exactly one cycle, returning entry, acceptance summary, and duplicate."""
-    cycle_id = str(payload.get("cycle_id", ""))
-    signal_id = str(payload.get("signal_id", ""))
-    if len(cycle_id) != 64 or cycle_id != signal_id:
-        raise ValueError("Cycle and signal IDs must be the same stable SHA-256 value.")
-    supplied_fingerprint = _cycle_fingerprint(payload)
-    LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with LOCK_PATH.open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        records = _load_unlocked()
-        for record in records:
-            if record["cycle_id"] == cycle_id:
-                recorded_fingerprint = str(
-                    record.get("cycle_fingerprint") or _cycle_fingerprint(record)
-                )
-                if recorded_fingerprint != supplied_fingerprint:
-                    raise LedgerConflictError(
-                        "Duplicate signal ID was reused with different cycle evidence."
-                    )
-                return record, _acceptance_summary(records, now=datetime.now(timezone.utc)), True
-
-        expected_before = (
-            (STARTING_USDC, STARTING_ETH)
-            if not records
-            else _portfolio(records[-1]["portfolio_after"], "portfolio_after")
-        )
-        supplied_before = _portfolio(payload.get("portfolio_before"), "portfolio_before")
-        _portfolio(payload.get("portfolio_after"), "portfolio_after")
-        if supplied_before != expected_before:
-            raise LedgerConflictError(
-                "Paper cycle was computed from a stale portfolio; no entry was appended."
-            )
-
-        entry: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
-            "sequence": len(records) + 1,
-            "previous_hash": records[-1]["entry_hash"] if records else "0" * 64,
-            **payload,
-            "cycle_fingerprint": supplied_fingerprint,
-        }
-        prospective = records + [entry]
-        entry["acceptance"] = _acceptance_summary(
-            prospective,
-            now=datetime.fromisoformat(str(entry["recorded_at"])),
-        )
-        entry["entry_hash"] = _entry_hash(entry)
-        encoded = json.dumps(entry, sort_keys=True) + "\n"
-        with LEDGER_PATH.open("a", encoding="utf-8") as ledger_handle:
-            ledger_handle.write(encoded)
-            ledger_handle.flush()
-            os.fsync(ledger_handle.fileno())
-        records.append(entry)
-        return entry, _acceptance_summary(records, now=datetime.now(timezone.utc)), False
 
 
 def ledger_status() -> dict[str, object]:

@@ -17,14 +17,13 @@ from app.paper_cycle_ledger import (
     ACCEPTANCE_POLICY_VERSION,
     STRATEGY_ID,
     STRATEGY_VERSION,
-    commit_cycle,
     ledger_status,
     make_signal_id,
 )
 from app.paper_execution import simulate_order
 from app.paper_portfolio import load_portfolio
 from app.paper_portfolio import apply_order
-from app.risk_accounting import evaluate_portfolio_risk
+from app.risk_accounting import portfolio_risk_transaction
 from app.research_feed import load_research_evidence
 from app.safety_gate import evaluate_safety_gate
 from app.telegram_reporter import report_is_due, send_daily_report
@@ -115,122 +114,155 @@ def run_shadow_cycle() -> None:
     proposal = create_trade_proposal()
     research = load_research_evidence()
     safety_gate = evaluate_safety_gate(proposal)
-    portfolio = load_portfolio()
-    accounting = evaluate_portfolio_risk(
-        portfolio,
-        proposal.reference_price,
-    )
-    accounting_allowed = (
-        accounting.ready
-        and not accounting.drawdown_halt
-        and not (accounting.daily_loss_halt and proposal.signal == Signal.BUY)
-    )
-    position_allowed = (
-        (proposal.signal == Signal.BUY and portfolio.eth_balance == 0)
-        or (proposal.signal == Signal.SELL and portfolio.eth_balance > 0)
-    )
-    system_healthy = (
-        safety_gate.allowed
-        and accounting_allowed
-        and research.ready
-    )
-    credit_enabled = acceptance_credit_enabled()
-    paper_eligible = (
-        system_healthy
-        and position_allowed
-        and credit_enabled
-    )
-    simulated = False
-    order_status = "BLOCKED"
-    order = None
-    updated_portfolio = portfolio
-    if paper_eligible:
-        order = simulate_order(proposal)
-        try:
-            updated_portfolio = apply_order(portfolio, order)
-            if updated_portfolio != portfolio:
-                simulated = True
-            order_status = order.status
-        except ValueError as error:
-            paper_eligible = False
-            order_status = f"REJECTED: {error}"
-    blocked_reason = "; ".join(
-        reason
-        for ready, reason in (
-            (safety_gate.allowed, safety_gate.reason),
-            (accounting_allowed, accounting.reason),
-            (research.ready, research.reason),
-            (position_allowed, "Signal is HOLD or does not reduce/open the expected position."),
-            (credit_enabled, "Corrected paper acceptance credit is frozen pending review."),
-        )
-        if not ready
-    ) or (order_status if not paper_eligible else "")
     signal_id = make_signal_id(
         signal=proposal.signal.value,
         reference_price=proposal.reference_price,
         market_data_observed_at=proposal.market_data_observed_at,
     )
-    order_payload = {
-        "status": order_status,
-        "side": order.side.value if order is not None else proposal.signal.value,
-        "amount_usdc": str(order.amount_usdc) if order is not None else "0",
-        "quantity_eth": str(order.quantity_eth) if order is not None else "0",
-        "execution_price": _decimal_text(order.execution_price) if order is not None else None,
-        "fee_usdc": str(order.fee_usdc) if order is not None else "0",
+    signal_evidence = {
+        "cycle_id": signal_id,
+        "signal_id": signal_id,
+        "strategy_id": STRATEGY_ID,
+        "strategy_version": STRATEGY_VERSION,
+        "acceptance_policy_version": ACCEPTANCE_POLICY_VERSION,
+        "signal": proposal.signal.value,
+        "reference_price": str(proposal.reference_price),
+        "maximum_risk": str(proposal.maximum_risk),
+        "market_data_observed_at": proposal.market_data_observed_at.isoformat(),
+        "market_data_received_at": (
+            proposal.market_data_received_at.isoformat()
+            if proposal.market_data_received_at is not None
+            else None
+        ),
+        "market_data_age_seconds": safety_gate.market_data_age_seconds,
+        "kill_switch_state": safety_gate.kill_switch_state,
+        "safety_allowed": safety_gate.allowed,
+        "safety_reason": safety_gate.reason,
+        "research_ready": research.ready,
+        "research_reason": research.reason,
+        "research_packet_ids": list(research.packet_ids),
+        "research_age_seconds": research.age_seconds,
+        "research_qualities": list(research.qualities),
     }
-    simulated_value_after = (
-        updated_portfolio.usdc_balance
-        + updated_portfolio.eth_balance * proposal.reference_price
-    )
-    simulated_pnl_after = simulated_value_after - Decimal("10000.00")
-    ledger_entry, acceptance, duplicate = commit_cycle(
-        {
-            "recorded_at": recorded_at.isoformat(),
-            "cycle_id": signal_id,
-            "signal_id": signal_id,
-            "strategy_id": STRATEGY_ID,
-            "strategy_version": STRATEGY_VERSION,
-            "acceptance_policy_version": ACCEPTANCE_POLICY_VERSION,
-            "acceptance_credit_enabled": credit_enabled,
-            "paper_only": True,
-            "live_route": False,
-            "signal": proposal.signal.value,
-            "reference_price": str(proposal.reference_price),
-            "maximum_risk": str(proposal.maximum_risk),
-            "market_data_observed_at": proposal.market_data_observed_at.isoformat(),
-            "market_data_received_at": (
-                proposal.market_data_received_at.isoformat()
-                if proposal.market_data_received_at is not None
-                else None
-            ),
-            "market_data_age_seconds": safety_gate.market_data_age_seconds,
-            "kill_switch_state": safety_gate.kill_switch_state,
-            "safety_allowed": safety_gate.allowed,
-            "safety_reason": safety_gate.reason,
-            "research_ready": research.ready,
-            "research_reason": research.reason,
-            "research_packet_ids": list(research.packet_ids),
-            "research_age_seconds": research.age_seconds,
-            "research_qualities": list(research.qualities),
-            "accounting_ready": accounting.ready,
-            "accounting_reason": accounting.reason,
-            "portfolio_value": _decimal_text(accounting.current_value),
-            "high_water_mark": _decimal_text(accounting.high_water_mark),
-            "daily_start_value": _decimal_text(accounting.daily_start_value),
-            "drawdown_percent": _decimal_text(accounting.drawdown_percent),
-            "daily_loss_percent": _decimal_text(accounting.daily_loss_percent),
-            "position_allowed": position_allowed,
-            "system_healthy": system_healthy,
-            "paper_eligible": paper_eligible,
-            "simulated": simulated,
-            "blocked_reason": blocked_reason,
-            "order": order_payload,
-            "portfolio_before": _portfolio_payload(portfolio),
-            "portfolio_after": _portfolio_payload(updated_portfolio),
-            "simulated_value_after": str(simulated_value_after),
-            "simulated_pnl_after": str(simulated_pnl_after),
+    portfolio = load_portfolio()
+    with portfolio_risk_transaction(
+        portfolio,
+        proposal.reference_price,
+        now=recorded_at,
+        signal_evidence=signal_evidence,
+    ) as risk_transaction:
+        accounting = risk_transaction.decision
+        accounting_allowed = (
+            accounting.ready
+            and not accounting.drawdown_halt
+            and not (accounting.daily_loss_halt and proposal.signal == Signal.BUY)
+        )
+        position_allowed = (
+            (proposal.signal == Signal.BUY and portfolio.eth_balance == 0)
+            or (proposal.signal == Signal.SELL and portfolio.eth_balance > 0)
+        )
+        system_healthy = (
+            safety_gate.allowed
+            and accounting_allowed
+            and research.ready
+        )
+        credit_enabled = acceptance_credit_enabled()
+        paper_eligible = (
+            system_healthy
+            and position_allowed
+            and credit_enabled
+        )
+        simulated = False
+        order_status = "BLOCKED"
+        order = None
+        updated_portfolio = portfolio
+        if paper_eligible:
+            order = simulate_order(proposal)
+            try:
+                updated_portfolio = apply_order(portfolio, order)
+                if updated_portfolio != portfolio:
+                    simulated = True
+                order_status = order.status
+            except ValueError as error:
+                paper_eligible = False
+                order_status = f"REJECTED: {error}"
+        blocked_reason = "; ".join(
+            reason
+            for ready, reason in (
+                (safety_gate.allowed, safety_gate.reason),
+                (accounting_allowed, accounting.reason),
+                (research.ready, research.reason),
+                (position_allowed, "Signal is HOLD or does not reduce/open the expected position."),
+                (credit_enabled, "Corrected paper acceptance credit is frozen pending review."),
+            )
+            if not ready
+        ) or (order_status if not paper_eligible else "")
+        order_payload = {
+            "status": order_status,
+            "side": order.side.value if order is not None else proposal.signal.value,
+            "amount_usdc": str(order.amount_usdc) if order is not None else "0",
+            "quantity_eth": str(order.quantity_eth) if order is not None else "0",
+            "execution_price": _decimal_text(order.execution_price) if order is not None else None,
+            "fee_usdc": str(order.fee_usdc) if order is not None else "0",
         }
-    )
+        simulated_value_after = (
+            updated_portfolio.usdc_balance
+            + updated_portfolio.eth_balance * proposal.reference_price
+        )
+        simulated_pnl_after = simulated_value_after - Decimal("10000.00")
+        ledger_entry, acceptance, duplicate = risk_transaction.commit_cycle(
+            {
+                "recorded_at": recorded_at.isoformat(),
+                "cycle_id": signal_id,
+                "signal_id": signal_id,
+                "strategy_id": STRATEGY_ID,
+                "strategy_version": STRATEGY_VERSION,
+                "acceptance_policy_version": ACCEPTANCE_POLICY_VERSION,
+                "acceptance_credit_enabled": credit_enabled,
+                "paper_only": True,
+                "live_route": False,
+                "signal": proposal.signal.value,
+                "reference_price": str(proposal.reference_price),
+                "maximum_risk": str(proposal.maximum_risk),
+                "market_data_observed_at": proposal.market_data_observed_at.isoformat(),
+                "market_data_received_at": (
+                    proposal.market_data_received_at.isoformat()
+                    if proposal.market_data_received_at is not None
+                    else None
+                ),
+                "market_data_age_seconds": safety_gate.market_data_age_seconds,
+                "kill_switch_state": safety_gate.kill_switch_state,
+                "safety_allowed": safety_gate.allowed,
+                "safety_reason": safety_gate.reason,
+                "research_ready": research.ready,
+                "research_reason": research.reason,
+                "research_packet_ids": list(research.packet_ids),
+                "research_age_seconds": research.age_seconds,
+                "research_qualities": list(research.qualities),
+                "accounting_ready": accounting.ready,
+                "accounting_reason": accounting.reason,
+                "portfolio_value": _decimal_text(accounting.current_value),
+                "high_water_mark": _decimal_text(accounting.high_water_mark),
+                "daily_start_value": _decimal_text(accounting.daily_start_value),
+                "drawdown_percent": _decimal_text(accounting.drawdown_percent),
+                "daily_loss_percent": _decimal_text(accounting.daily_loss_percent),
+                "accounting_date": (
+                    accounting.daily_date.isoformat()
+                    if accounting.daily_date is not None
+                    else None
+                ),
+                "position_allowed": position_allowed,
+                "system_healthy": system_healthy,
+                "paper_eligible": paper_eligible,
+                "simulated": simulated,
+                "blocked_reason": blocked_reason,
+                "order": order_payload,
+                "portfolio_before": _portfolio_payload(portfolio),
+                "portfolio_after": _portfolio_payload(updated_portfolio),
+                "simulated_value_after": str(simulated_value_after),
+                "simulated_pnl_after": str(simulated_pnl_after),
+            }
+        )
     if duplicate:
         order_status = str(ledger_entry["order"]["status"])
         simulated = bool(ledger_entry["simulated"])

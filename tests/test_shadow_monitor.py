@@ -1,16 +1,25 @@
+import hashlib
 import json
 import os
+import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from http.client import HTTPConnection
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from app.paper_cycle_ledger import LedgerConflictError, read_ledger
 from app.paper_execution import PaperOrder
-from app.paper_portfolio import PaperPortfolio
-from app.risk_accounting import RiskAccountingDecision
+from app.paper_portfolio import PaperPortfolio, load_portfolio
+from app.risk_accounting import (
+    RiskAccountingDecision,
+    RiskAccountingTransaction,
+    portfolio_risk_transaction,
+)
 from app.safety_gate import SafetyGateDecision
 from app.shadow_monitor import (
     HealthHandler,
@@ -85,6 +94,14 @@ class ShadowMonitorTests(unittest.TestCase):
         }
         return entry, summary, duplicate
 
+    @staticmethod
+    @contextmanager
+    def risk_transaction(accounting, commit):
+        transaction = MagicMock()
+        transaction.decision = accounting
+        transaction.commit_cycle = commit
+        yield transaction
+
     def test_eligible_cycle_commits_only_simulated_portfolio(self):
         proposal, research, safety, accounting = self.common()
         portfolio = PaperPortfolio(Decimal("10000"), Decimal("0"))
@@ -96,16 +113,25 @@ class ShadowMonitorTests(unittest.TestCase):
             Decimal("0.024975"),
             "SIMULATED",
         )
+        commit = MagicMock(
+            return_value=self.ledger_result(
+                eligible=True,
+                simulated=True,
+                status="SIMULATED",
+            )
+        )
         with (
             patch("app.shadow_monitor.create_trade_proposal", return_value=proposal),
             patch("app.shadow_monitor.load_research_evidence", return_value=research),
             patch("app.shadow_monitor.evaluate_safety_gate", return_value=safety),
             patch("app.shadow_monitor.load_portfolio", return_value=portfolio),
-            patch("app.shadow_monitor.evaluate_portfolio_risk", return_value=accounting),
+            patch(
+                "app.shadow_monitor.portfolio_risk_transaction",
+                return_value=self.risk_transaction(accounting, commit),
+            ),
             patch("app.shadow_monitor.acceptance_credit_enabled", return_value=True),
             patch("app.shadow_monitor.simulate_order", return_value=order),
             patch("app.shadow_monitor.apply_order", return_value=updated),
-            patch("app.shadow_monitor.commit_cycle", return_value=self.ledger_result(eligible=True, simulated=True, status="SIMULATED")) as commit,
             patch("app.shadow_monitor.record_decision") as record,
             patch("app.shadow_monitor._write_operator_status"),
             patch("app.shadow_monitor.report_is_due", return_value=False),
@@ -122,15 +148,20 @@ class ShadowMonitorTests(unittest.TestCase):
     def test_credit_freeze_blocks_simulation_and_acceptance(self):
         proposal, research, safety, accounting = self.common()
         portfolio = PaperPortfolio(Decimal("10000"), Decimal("0"))
+        commit = MagicMock(
+            return_value=self.ledger_result(eligible=False, simulated=False)
+        )
         with (
             patch("app.shadow_monitor.create_trade_proposal", return_value=proposal),
             patch("app.shadow_monitor.load_research_evidence", return_value=research),
             patch("app.shadow_monitor.evaluate_safety_gate", return_value=safety),
             patch("app.shadow_monitor.load_portfolio", return_value=portfolio),
-            patch("app.shadow_monitor.evaluate_portfolio_risk", return_value=accounting),
+            patch(
+                "app.shadow_monitor.portfolio_risk_transaction",
+                return_value=self.risk_transaction(accounting, commit),
+            ),
             patch("app.shadow_monitor.acceptance_credit_enabled", return_value=False),
             patch("app.shadow_monitor.simulate_order") as simulate,
-            patch("app.shadow_monitor.commit_cycle", return_value=self.ledger_result(eligible=False, simulated=False)) as commit,
             patch("app.shadow_monitor.record_decision"),
             patch("app.shadow_monitor._write_operator_status"),
             patch("app.shadow_monitor.report_is_due", return_value=False),
@@ -145,14 +176,23 @@ class ShadowMonitorTests(unittest.TestCase):
     def test_duplicate_cycle_does_not_duplicate_trade_journal(self):
         proposal, research, safety, accounting = self.common()
         portfolio = PaperPortfolio(Decimal("10000"), Decimal("0"))
+        commit = MagicMock(
+            return_value=self.ledger_result(
+                eligible=False,
+                simulated=False,
+                duplicate=True,
+            )
+        )
         with (
             patch("app.shadow_monitor.create_trade_proposal", return_value=proposal),
             patch("app.shadow_monitor.load_research_evidence", return_value=research),
             patch("app.shadow_monitor.evaluate_safety_gate", return_value=safety),
             patch("app.shadow_monitor.load_portfolio", return_value=portfolio),
-            patch("app.shadow_monitor.evaluate_portfolio_risk", return_value=accounting),
+            patch(
+                "app.shadow_monitor.portfolio_risk_transaction",
+                return_value=self.risk_transaction(accounting, commit),
+            ),
             patch("app.shadow_monitor.acceptance_credit_enabled", return_value=False),
-            patch("app.shadow_monitor.commit_cycle", return_value=self.ledger_result(eligible=False, simulated=False, duplicate=True)),
             patch("app.shadow_monitor.record_decision") as record,
             patch("app.shadow_monitor._write_operator_status"),
             patch("app.shadow_monitor.report_is_due", return_value=False),
@@ -160,6 +200,245 @@ class ShadowMonitorTests(unittest.TestCase):
             run_shadow_cycle()
         record.assert_not_called()
         self.assertTrue(STATE["paper_cycle_duplicate"])
+
+    def test_production_retry_after_simulated_trade_returns_original_cycle(self):
+        proposal, research, safety, _ = self.common()
+        loaded_portfolios = []
+        transaction_times = []
+
+        def observed_load():
+            portfolio = load_portfolio()
+            loaded_portfolios.append(portfolio)
+            return portfolio
+
+        def observed_transaction(*args, **kwargs):
+            transaction_times.append(kwargs["now"])
+            return portfolio_risk_transaction(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            ledger_path = directory_path / "ledger.jsonl"
+            risk_path = directory_path / "risk.json"
+            with (
+                patch("app.paper_cycle_ledger.LEDGER_PATH", ledger_path),
+                patch(
+                    "app.paper_cycle_ledger.LOCK_PATH",
+                    directory_path / "ledger.lock",
+                ),
+                patch("app.risk_accounting.RISK_STATE_PATH", risk_path),
+                patch(
+                    "app.risk_accounting.RISK_LOCK_PATH",
+                    directory_path / "risk.lock",
+                ),
+                patch("app.shadow_monitor.create_trade_proposal", return_value=proposal),
+                patch(
+                    "app.shadow_monitor.load_research_evidence",
+                    return_value=research,
+                ) as research_loader,
+                patch("app.shadow_monitor.evaluate_safety_gate", return_value=safety),
+                patch(
+                    "app.shadow_monitor.load_portfolio",
+                    side_effect=observed_load,
+                ),
+                patch(
+                    "app.shadow_monitor.portfolio_risk_transaction",
+                    side_effect=observed_transaction,
+                ),
+                patch("app.shadow_monitor.acceptance_credit_enabled", return_value=True),
+                patch("app.shadow_monitor.record_decision") as record,
+                patch("app.shadow_monitor._write_operator_status"),
+                patch("app.shadow_monitor.report_is_due", return_value=False),
+                patch("builtins.print"),
+            ):
+                run_shadow_cycle()
+                original = read_ledger()[0]
+                cache_after_first = risk_path.read_bytes()
+                run_shadow_cycle()
+                records = read_ledger()
+                cache_after_retry = risk_path.read_bytes()
+                portfolios_after_retry = list(loaded_portfolios)
+                research_loader.return_value = SimpleNamespace(
+                    **{**research.__dict__, "reason": "Changed research evidence."}
+                )
+                with self.assertRaisesRegex(
+                    LedgerConflictError, "immutable signal evidence"
+                ):
+                    run_shadow_cycle()
+                self.assertEqual(len(read_ledger()), 1)
+                self.assertEqual(risk_path.read_bytes(), cache_after_retry)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["entry_hash"], original["entry_hash"])
+        self.assertEqual(cache_after_retry, cache_after_first)
+        self.assertEqual(len(portfolios_after_retry), 2)
+        self.assertGreater(transaction_times[1], transaction_times[0])
+        self.assertEqual(
+            portfolios_after_retry[1],
+            PaperPortfolio(
+                Decimal(original["portfolio_after"]["usdc_balance"]),
+                Decimal(original["portfolio_after"]["eth_balance"]),
+            ),
+        )
+        self.assertEqual(
+            records[0]["portfolio_after"],
+            STATE["paper_portfolio_after"],
+        )
+        self.assertTrue(STATE["paper_cycle_duplicate"])
+        self.assertEqual(STATE["ledger_head"], original["entry_hash"])
+        self.assertEqual(record.call_count, 1)
+
+    def test_stale_concurrent_cycle_cannot_commit_its_risk_update(self):
+        proposal_a, research, safety, _ = self.common()
+        proposal_a = SimpleNamespace(
+            **{
+                **proposal_a.__dict__,
+                "signal": Signal.SELL,
+                "reference_price": Decimal("2200"),
+                "maximum_risk": Decimal("500"),
+            }
+        )
+        proposal_b = SimpleNamespace(
+            **{
+                **proposal_a.__dict__,
+                "reference_price": Decimal("1800"),
+                "market_data_observed_at": self.observed_at.replace(second=1),
+                "market_data_received_at": self.observed_at.replace(second=1),
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            ledger_path = directory_path / "ledger.jsonl"
+            risk_path = directory_path / "risk.json"
+            ledger_lock_path = directory_path / "ledger.lock"
+            risk_lock_path = directory_path / "risk.lock"
+            with (
+                patch("app.paper_cycle_ledger.LEDGER_PATH", ledger_path),
+                patch("app.paper_cycle_ledger.LOCK_PATH", ledger_lock_path),
+                patch("app.risk_accounting.RISK_STATE_PATH", risk_path),
+                patch("app.risk_accounting.RISK_LOCK_PATH", risk_lock_path),
+            ):
+                seed_id = hashlib.sha256(b"seed-eth-position").hexdigest()
+                with portfolio_risk_transaction(
+                    PaperPortfolio(Decimal("10000.00"), Decimal("0")),
+                    Decimal("2000"),
+                    now=self.observed_at,
+                ) as seed_transaction:
+                    seed_decision = seed_transaction.decision
+                    seed_transaction.commit_cycle({
+                        "recorded_at": self.observed_at.isoformat(),
+                        "cycle_id": seed_id,
+                        "signal_id": seed_id,
+                        "reference_price": "2000",
+                        "accounting_date": self.observed_at.date().isoformat(),
+                        "portfolio_value": str(seed_decision.current_value),
+                        "high_water_mark": str(seed_decision.high_water_mark),
+                        "daily_start_value": str(seed_decision.daily_start_value),
+                        "system_healthy": True,
+                        "paper_eligible": False,
+                        "simulated": True,
+                        "blocked_reason": "seed",
+                        "order": {"status": "SIMULATED"},
+                        "portfolio_before": {
+                            "usdc_balance": "10000.00",
+                            "eth_balance": "0",
+                        },
+                        "portfolio_after": {
+                            "usdc_balance": "9000",
+                            "eth_balance": "0.5",
+                        },
+                    })
+
+                both_loaded = threading.Barrier(2)
+                a_committed = threading.Event()
+                loaded_portfolios = {}
+                errors = {}
+                actual_transaction_commit = RiskAccountingTransaction.commit_cycle
+
+                def concurrent_load():
+                    name = threading.current_thread().name
+                    portfolio = load_portfolio()
+                    loaded_portfolios[name] = portfolio
+                    both_loaded.wait(timeout=2)
+                    if name == "cycle-b" and not a_committed.wait(timeout=2):
+                        raise AssertionError("cycle A did not commit")
+                    return portfolio
+
+                def concurrent_proposal():
+                    if threading.current_thread().name == "cycle-a":
+                        return proposal_a
+                    return proposal_b
+
+                def observed_commit(transaction, payload):
+                    result = actual_transaction_commit(transaction, payload)
+                    if threading.current_thread().name == "cycle-a":
+                        a_committed.set()
+                    return result
+
+                def run_cycle():
+                    name = threading.current_thread().name
+                    try:
+                        run_shadow_cycle()
+                    except Exception as error:
+                        errors[name] = error
+
+                with (
+                    patch(
+                        "app.shadow_monitor.create_trade_proposal",
+                        side_effect=concurrent_proposal,
+                    ),
+                    patch(
+                        "app.shadow_monitor.load_research_evidence",
+                        return_value=research,
+                    ),
+                    patch(
+                        "app.shadow_monitor.evaluate_safety_gate",
+                        return_value=safety,
+                    ),
+                    patch(
+                        "app.shadow_monitor.load_portfolio",
+                        side_effect=concurrent_load,
+                    ),
+                    patch(
+                        "app.risk_accounting.RiskAccountingTransaction.commit_cycle",
+                        autospec=True,
+                        side_effect=observed_commit,
+                    ),
+                    patch(
+                        "app.shadow_monitor.acceptance_credit_enabled",
+                        return_value=True,
+                    ),
+                    patch("app.shadow_monitor.record_decision"),
+                    patch("app.shadow_monitor._write_operator_status"),
+                    patch("app.shadow_monitor.report_is_due", return_value=False),
+                    patch("builtins.print"),
+                ):
+                    cycle_a = threading.Thread(target=run_cycle, name="cycle-a")
+                    cycle_b = threading.Thread(target=run_cycle, name="cycle-b")
+                    cycle_a.start()
+                    cycle_b.start()
+                    cycle_a.join(timeout=3)
+                    cycle_b.join(timeout=3)
+
+                self.assertFalse(cycle_a.is_alive())
+                self.assertFalse(cycle_b.is_alive())
+                self.assertEqual(loaded_portfolios["cycle-a"], loaded_portfolios["cycle-b"])
+                self.assertNotIn("cycle-a", errors)
+                self.assertIsInstance(errors.get("cycle-b"), LedgerConflictError)
+
+                records = read_ledger()
+                self.assertEqual(len(records), 2)
+                accepted_cycle = records[-1]
+                self.assertEqual(accepted_cycle["reference_price"], "2200")
+                risk_state = json.loads(risk_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    Decimal(risk_state["last_portfolio_value"]),
+                    Decimal(accepted_cycle["portfolio_value"]),
+                )
+                self.assertEqual(
+                    Decimal(risk_state["last_portfolio_value"]),
+                    Decimal("10100.0"),
+                )
 
     def test_health_endpoint_returns_only_public_fields(self):
         original_state = STATE.copy()
