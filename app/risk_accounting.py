@@ -11,7 +11,7 @@ from app.paper_portfolio import PaperPortfolio
 from app.paper_trader import STARTING_BALANCE
 
 
-RISK_STATE_PATH = Path("data/paper_risk_state.json")
+RISK_STATE_PATH = Path("data/paper_risk_state_v2.json")
 STATE_VERSION = 1
 MAX_DAILY_LOSS_PERCENT = Decimal("5")
 MAX_DRAWDOWN_PERCENT = Decimal("20")

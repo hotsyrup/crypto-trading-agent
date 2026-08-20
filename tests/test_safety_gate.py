@@ -32,6 +32,18 @@ class SafetyGateTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.kill_switch_state, "halted")
         self.assertEqual(decision.reason, "Paper kill switch is halted.")
+        self.assertEqual(decision.market_data_age_seconds, 0)
+
+    def test_halted_gate_still_reports_market_data_age(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            decision = evaluate_safety_gate(
+                self.proposal(self.now - timedelta(seconds=45)),
+                now=self.now,
+            )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason, "Paper kill switch is halted.")
+        self.assertEqual(decision.market_data_age_seconds, 45)
 
     def test_fresh_data_passes_when_explicitly_armed(self) -> None:
         with patch.dict(
