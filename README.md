@@ -264,11 +264,19 @@ Run the long-lived worker and health endpoint:
 python -m app.research_agent
 ```
 
-The service exposes two read-only endpoints:
+The service exposes these public read-only routes:
 
 * `/health` reports provider and execution-boundary status.
-* `/research/latest` returns the latest public research packets and marks
-  expired packets with `is_stale=true`.
+* `/research/crypto/base/latest` returns the latest public Base research
+  packets and marks expired packets with `is_stale=true`.
+
+`/research/latest` remains a temporary compatibility alias. The reserved
+`/research/equities/latest` and `/research/bitcoin-network/latest` routes
+return HTTP 501 with `status=not_configured`, empty packets, observation-only
+mode, and execution disabled. They prevent callers from mistaking a planned
+domain for a verified capability. Future domain workers must define their own
+packet contracts, providers, freshness rules, consumers, and authority
+boundaries before either route can return evidence.
 
 For a second Railway service, select `/railway.research.json` as its custom
 config-as-code file and `Dockerfile.research` as its Dockerfile. Attach a

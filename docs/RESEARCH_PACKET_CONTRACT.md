@@ -10,6 +10,12 @@ The response contains exactly `service`, `schema_version`, `mode`, `execution`,
 `generated_at`, and `packets`. `schema_version` is `2`, `mode` is
 `observation_only`, and `execution` is `disabled`.
 
+The canonical Base route is `/research/crypto/base/latest`. The legacy
+`/research/latest` route is a compatibility alias and is not accepted by the
+strict Trading Agent reader. Reserved equities and Bitcoin-network routes
+return explicit HTTP 501 `not_configured` responses until separately built and
+verified.
+
 ## Packet enrichment
 
 Each packet retains the version-1 identity, timestamps, market fields,

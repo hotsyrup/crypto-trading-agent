@@ -14,8 +14,10 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_RESEARCH_URL = (
-    "https://lumen-base-research-agent-production.up.railway.app/research/latest"
+    "https://lumen-base-research-agent-production.up.railway.app"
+    "/research/crypto/base/latest"
 )
+BASE_RESEARCH_PATH = "/research/crypto/base/latest"
 ALLOWED_HOST = "lumen-base-research-agent-production.up.railway.app"
 WETH_CONTRACT = "0x4200000000000000000000000000000000000006"
 USDC_CONTRACT = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
@@ -253,8 +255,8 @@ def get_research_payload() -> object:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_HOST:
         raise ValueError("Research feed must use the approved Railway HTTPS host.")
-    if parsed.path != "/research/latest" or parsed.query or parsed.fragment:
-        raise ValueError("Research feed path must be /research/latest.")
+    if parsed.path != BASE_RESEARCH_PATH or parsed.query or parsed.fragment:
+        raise ValueError(f"Research feed path must be {BASE_RESEARCH_PATH}.")
     request = Request(url, headers={"User-Agent": "lumen-trading-monitor/2"})
     with urlopen(request, timeout=10) as response:  # nosec B310
         return json.load(response)

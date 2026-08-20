@@ -19,6 +19,7 @@ from app.research_agent import (
     load_latest_packets,
     load_config,
     public_health_state,
+    public_route_response,
     select_primary_pair,
     store_packets,
 )
@@ -261,6 +262,23 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(health["providers"]["bankr"], "disabled")
         self.assertEqual(health["execution"], "disabled")
         self.assertNotIn("last_error", health)
+
+    def test_unbuilt_domain_routes_are_explicitly_unavailable(self) -> None:
+        for path, domain in (
+            ("/research/equities/latest", "equities"),
+            ("/research/bitcoin-network/latest", "bitcoin-network"),
+        ):
+            with self.subTest(path=path):
+                status, response = public_route_response(path)
+                self.assertEqual(status, 501)
+                self.assertEqual(response["domain"], domain)
+                self.assertEqual(response["status"], "not_configured")
+                self.assertEqual(response["mode"], "observation_only")
+                self.assertEqual(response["execution"], "disabled")
+                self.assertEqual(response["packets"], [])
+
+    def test_unknown_research_route_is_not_silently_accepted(self) -> None:
+        self.assertIsNone(public_route_response("/research/options/latest"))
 
 
 if __name__ == "__main__":

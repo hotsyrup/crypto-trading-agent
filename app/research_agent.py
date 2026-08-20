@@ -29,6 +29,10 @@ ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 MAX_API_CANDIDATES = 30
 MAX_PROVIDER_ATTEMPTS = 3
 RESEARCH_SCHEMA_VERSION = 2
+BASE_RESEARCH_PATH = "/research/crypto/base/latest"
+LEGACY_RESEARCH_PATH = "/research/latest"
+EQUITIES_RESEARCH_PATH = "/research/equities/latest"
+BITCOIN_NETWORK_RESEARCH_PATH = "/research/bitcoin-network/latest"
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 DEFAULT_WATCHLIST = (
     "0x4200000000000000000000000000000000000006",  # WETH on Base
@@ -490,25 +494,53 @@ def public_health_state() -> dict[str, object]:
     }
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path in {"/", "/health"}:
-            response = public_health_state()
-        elif self.path == "/research/latest":
-            *_, database_path, _ = load_config()
-            response = {
+def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
+    """Return one public read-only response without implying unbuilt capability."""
+    if path in {"/", "/health"}:
+        return (200 if STATE["status"] != "failed" else 503, public_health_state())
+    if path in {BASE_RESEARCH_PATH, LEGACY_RESEARCH_PATH}:
+        *_, database_path, _ = load_config()
+        return (
+            200 if STATE["status"] != "failed" else 503,
+            {
                 "service": "lumen-base-research-agent",
                 "schema_version": RESEARCH_SCHEMA_VERSION,
                 "mode": "observation_only",
                 "execution": "disabled",
                 "generated_at": _utc_now().isoformat(),
                 "packets": load_latest_packets(database_path),
-            }
-        else:
+            },
+        )
+    unavailable_domains = {
+        EQUITIES_RESEARCH_PATH: "equities",
+        BITCOIN_NETWORK_RESEARCH_PATH: "bitcoin-network",
+    }
+    domain = unavailable_domains.get(path)
+    if domain is not None:
+        return (
+            501,
+            {
+                "service": "lumen-research-agent",
+                "schema_version": 1,
+                "domain": domain,
+                "status": "not_configured",
+                "mode": "observation_only",
+                "execution": "disabled",
+                "packets": [],
+            },
+        )
+    return None
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        result = public_route_response(self.path)
+        if result is None:
             self.send_error(404)
             return
+        status_code, response = result
         payload = json.dumps(response).encode()
-        self.send_response(200 if STATE["status"] != "failed" else 503)
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
