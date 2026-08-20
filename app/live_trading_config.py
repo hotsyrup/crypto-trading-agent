@@ -28,6 +28,8 @@ def _percent(name: str, default: str) -> Decimal:
     except InvalidOperation as error:
         raise ValueError(f"{name} must be a decimal percentage.") from error
 
+    if not parsed.is_finite():
+        raise ValueError(f"{name} must be a finite decimal percentage.")
     if parsed <= 0 or parsed > 100:
         raise ValueError(f"{name} must be greater than 0 and at most 100.")
     return parsed

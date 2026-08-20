@@ -40,6 +40,23 @@ class LiveTradingConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cannot exceed"):
                 load_live_trading_config()
 
+    def test_rejects_nonfinite_percentage_limits_as_value_errors(self) -> None:
+        names = (
+            "LIVE_MAX_POSITION_PERCENT",
+            "LIVE_MAX_NEW_STRATEGY_PERCENT",
+            "LIVE_MAX_DAILY_LOSS_PERCENT",
+            "LIVE_MAX_DRAWDOWN_PERCENT",
+        )
+        for name in names:
+            for value in ("NaN", "sNaN", "Infinity", "-Infinity"):
+                with self.subTest(name=name, value=value):
+                    with patch.dict(os.environ, {name: value}, clear=True):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            f"{name} must be a finite decimal percentage",
+                        ):
+                            load_live_trading_config()
+
     def test_rejects_spoofed_or_unreviewed_token_contract(self) -> None:
         with patch.dict(
             os.environ,
