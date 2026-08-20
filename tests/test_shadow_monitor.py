@@ -16,6 +16,7 @@ from app.shadow_monitor import (
     HealthHandler,
     STATE,
     TimedHTTPServer,
+    base_mcp_canary_boundary_status,
     public_health_state,
     run_shadow_cycle,
     validate_execution_boundary,
@@ -221,6 +222,18 @@ class ShadowMonitorTests(unittest.TestCase):
     def test_default_boundary_is_monitoring_only(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(validate_execution_boundary(), 3600)
+            self.assertEqual(
+                base_mcp_canary_boundary_status(),
+                {
+                    "mode": "prepare_only",
+                    "kill_switch_state": "halted",
+                    "maximum_notional_usdc": "1.00",
+                    "approval_ttl_seconds": 300,
+                    "live_route": False,
+                    "approval_requested": False,
+                    "signing_authority": "base_account_human_only",
+                },
+            )
 
     def test_live_trading_and_execution_modes_are_rejected(self):
         with patch.dict(os.environ, {"LIVE_TRADING_ENABLED": "true"}, clear=True):

@@ -11,6 +11,7 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from app.base_mcp_canary import load_base_mcp_canary_config
 from app.live_trading_config import load_live_trading_config
 from app.paper_acceptance import acceptance_credit_enabled, legacy_progress_status
 from app.paper_cycle_ledger import (
@@ -65,6 +66,19 @@ def _portfolio_payload(portfolio) -> dict[str, str]:
     }
 
 
+def base_mcp_canary_boundary_status() -> dict[str, object]:
+    config = load_base_mcp_canary_config()
+    return {
+        "mode": config.mode,
+        "kill_switch_state": config.kill_switch_state,
+        "maximum_notional_usdc": str(config.maximum_notional_usdc),
+        "approval_ttl_seconds": config.approval_ttl_seconds,
+        "live_route": False,
+        "approval_requested": False,
+        "signing_authority": "base_account_human_only",
+    }
+
+
 def _write_operator_status() -> None:
     """Persist a privacy-safe report available through authenticated Railway access."""
     report = {
@@ -75,6 +89,7 @@ def _write_operator_status() -> None:
         "boot_id": BOOT_ID,
         "deployed_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unavailable"),
         "state": STATE,
+        "base_mcp_canary": base_mcp_canary_boundary_status(),
         "ledger": ledger_status(),
         "legacy_acceptance": legacy_progress_status(),
     }
@@ -104,6 +119,7 @@ def validate_execution_boundary() -> int:
         raise ValueError("TRADING_MODE must remain monitoring_only.")
     if load_live_trading_config().enabled:
         raise ValueError("LIVE_TRADING_ENABLED must remain false.")
+    load_base_mcp_canary_config()
     interval = int(os.getenv("MONITOR_INTERVAL_SECONDS", "3600"))
     if interval < 300 or interval > 86400:
         raise ValueError("MONITOR_INTERVAL_SECONDS must be between 300 and 86400.")
@@ -394,6 +410,7 @@ def main() -> None:
                 "paper_only": True,
                 "live_route": False,
                 "signing_authority": "none",
+                "base_mcp_canary": base_mcp_canary_boundary_status(),
                 "deployed_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unavailable"),
                 **ledger_status(),
                 "legacy_acceptance": legacy_progress_status(),
