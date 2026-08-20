@@ -18,18 +18,14 @@ class PaperPortfolio:
 
 
 def load_portfolio() -> PaperPortfolio:
-    if not PORTFOLIO_PATH.exists():
-        return PaperPortfolio(
-            usdc_balance=STARTING_BALANCE,
-            eth_balance=Decimal("0"),
-        )
+    # The v2 cycle ledger is authoritative. The legacy portfolio remains on
+    # disk as frozen pre-fix evidence but is never read for new acceptance.
+    from app.paper_cycle_ledger import current_portfolio
 
-    with PORTFOLIO_PATH.open("r", encoding="utf-8") as portfolio_file:
-        data = json.load(portfolio_file)
-
+    usdc_balance, eth_balance = current_portfolio()
     return PaperPortfolio(
-        usdc_balance=Decimal(data["usdc_balance"]),
-        eth_balance=Decimal(data["eth_balance"]),
+        usdc_balance=usdc_balance,
+        eth_balance=eth_balance,
     )
 
 
@@ -41,18 +37,22 @@ def apply_order(
         return portfolio
 
     if order.side == Signal.BUY:
-        if order.amount_usdc > portfolio.usdc_balance:
+        total_cost = order.amount_usdc + order.fee_usdc
+        if total_cost > portfolio.usdc_balance:
             raise ValueError("Insufficient simulated USDC balance.")
 
         return PaperPortfolio(
-            usdc_balance=portfolio.usdc_balance - order.amount_usdc,
+            usdc_balance=portfolio.usdc_balance - total_cost,
             eth_balance=portfolio.eth_balance + order.quantity_eth,
         )
 
     if order.quantity_eth > portfolio.eth_balance:
         raise ValueError("Insufficient simulated ETH balance.")
 
-    proceeds = order.quantity_eth * order.reference_price
+    execution_price = order.execution_price or order.reference_price
+    proceeds = order.quantity_eth * execution_price - order.fee_usdc
+    if proceeds < 0:
+        raise ValueError("Simulated costs exceed sale proceeds.")
 
     return PaperPortfolio(
         usdc_balance=portfolio.usdc_balance + proceeds,
