@@ -64,19 +64,8 @@ def _portfolio_payload(portfolio) -> dict[str, str]:
     }
 
 
-def _write_operator_status() -> None:
-    """Persist a privacy-safe report available through authenticated Railway access."""
-    report = {
-        "schema_version": 2,
-        "paper_only": True,
-        "live_route": False,
-        "signing_authority": "none",
-        "boot_id": BOOT_ID,
-        "deployed_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unavailable"),
-        "state": STATE,
-        "ledger": ledger_status(),
-        "legacy_acceptance": legacy_progress_status(),
-    }
+def _persist_operator_report(report: dict[str, object]) -> None:
+    """Atomically replace the persisted operator report."""
     OPERATOR_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
     try:
@@ -95,6 +84,63 @@ def _write_operator_status() -> None:
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
+
+
+def _write_operator_status() -> None:
+    """Persist a privacy-safe report available through authenticated Railway access."""
+    _persist_operator_report(
+        {
+            "schema_version": 2,
+            "report_status": "complete",
+            "paper_only": True,
+            "live_route": False,
+            "signing_authority": "none",
+            "boot_id": BOOT_ID,
+            "deployed_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unavailable"),
+            "state": STATE,
+            "ledger": ledger_status(),
+            "legacy_acceptance": legacy_progress_status(),
+        }
+    )
+
+
+def _write_failure_operator_status() -> None:
+    """Persist minimal failure state without consulting failed cycle dependencies."""
+    _persist_operator_report(
+        {
+            "schema_version": 2,
+            "report_status": "failure_fallback",
+            "paper_only": True,
+            "live_route": False,
+            "signing_authority": "none",
+            "boot_id": BOOT_ID,
+            "deployed_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unavailable"),
+            "state": {
+                "mode": STATE.get("mode", "monitoring_only"),
+                "status": "failed",
+                "last_cycle_at": STATE.get("last_cycle_at"),
+                "last_error": STATE.get("last_error"),
+            },
+            "ledger": {"status": "unavailable"},
+            "legacy_acceptance": {"status": "unavailable"},
+        }
+    )
+
+
+def _record_cycle_failure(error: Exception) -> None:
+    """Expose a failed cycle in memory and best-effort persisted operator state."""
+    STATE.update(
+        status="failed",
+        last_error=type(error).__name__,
+        operator_status_write_error=None,
+    )
+    try:
+        _write_failure_operator_status()
+    except Exception as persistence_error:  # keep health endpoint alive for inspection
+        STATE.update(
+            operator_status_write_error=type(persistence_error).__name__,
+        )
+    print(json.dumps(STATE), flush=True)
 
 
 def validate_execution_boundary() -> int:
@@ -437,8 +483,7 @@ def main() -> None:
         try:
             run_shadow_cycle()
         except Exception as error:  # keep health endpoint alive for inspection
-            STATE.update(status="failed", last_error=type(error).__name__)
-            print(json.dumps(STATE), flush=True)
+            _record_cycle_failure(error)
         time.sleep(interval)
 
 

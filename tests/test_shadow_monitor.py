@@ -25,6 +25,7 @@ from app.shadow_monitor import (
     HealthHandler,
     STATE,
     TimedHTTPServer,
+    _record_cycle_failure,
     public_health_state,
     run_shadow_cycle,
     validate_execution_boundary,
@@ -486,6 +487,58 @@ class ShadowMonitorTests(unittest.TestCase):
                 "last_cycle_at": "now",
             },
         )
+
+    def test_cycle_failure_replaces_stale_healthy_operator_status(self):
+        original_state = STATE.copy()
+        self.addCleanup(lambda: (STATE.clear(), STATE.update(original_state)))
+        STATE.update(
+            mode="monitoring_only",
+            status="healthy",
+            last_cycle_at="2026-08-10T17:00:00+00:00",
+            last_error=None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "operator_status.json"
+            status_path.write_text(
+                json.dumps({"state": {"status": "healthy"}}),
+                encoding="utf-8",
+            )
+            with (
+                patch("app.shadow_monitor.OPERATOR_STATUS_PATH", status_path),
+                patch("app.shadow_monitor.ledger_status") as ledger,
+                patch("app.shadow_monitor.legacy_progress_status") as legacy,
+                patch("builtins.print"),
+            ):
+                _record_cycle_failure(RuntimeError("cycle failed"))
+
+            report = json.loads(status_path.read_text(encoding="utf-8"))
+
+        ledger.assert_not_called()
+        legacy.assert_not_called()
+        self.assertEqual(report["report_status"], "failure_fallback")
+        self.assertTrue(report["paper_only"])
+        self.assertFalse(report["live_route"])
+        self.assertEqual(report["signing_authority"], "none")
+        self.assertEqual(report["state"]["status"], "failed")
+        self.assertEqual(report["state"]["last_error"], "RuntimeError")
+        self.assertEqual(report["ledger"], {"status": "unavailable"})
+
+    def test_cycle_failure_survives_operator_status_write_failure(self):
+        original_state = STATE.copy()
+        self.addCleanup(lambda: (STATE.clear(), STATE.update(original_state)))
+        with (
+            patch(
+                "app.shadow_monitor._write_failure_operator_status",
+                side_effect=OSError("status path unavailable"),
+            ),
+            patch("builtins.print") as output,
+        ):
+            _record_cycle_failure(ValueError("cycle failed"))
+
+        self.assertEqual(STATE["status"], "failed")
+        self.assertEqual(STATE["last_error"], "ValueError")
+        self.assertEqual(STATE["operator_status_write_error"], "OSError")
+        output.assert_called_once()
 
     @patch("http.server.HTTPServer.get_request")
     def test_health_server_times_out_slow_clients(self, get_request):
