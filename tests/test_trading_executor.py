@@ -271,8 +271,10 @@ class TradingExecutorTests(unittest.TestCase):
                 executor_config=executor_config(),
             )
         self.assertTrue(first.journal_recorded)
+        self.assertIsNotNone(first.journal_entry_hash)
         self.assertFalse(first.ready_for_submission)
         self.assertTrue(replay.duplicate_blocked)
+        self.assertEqual(replay.journal_entry_hash, first.journal_entry_hash)
         self.assertEqual(replay.decision.status, "DUPLICATE_BLOCKED")
         self.assertFalse(replay.ready_for_submission)
 

@@ -3,11 +3,16 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.journal_lock import (
+    acquire_file_lock,
+    establish_file_durability,
+    ensure_durable_parent,
+)
 from app.trading_executor import ExecutionDecision
 
 
@@ -78,9 +83,9 @@ def append_execution_decision(
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise ValueError("Journal timestamp must include a timezone.")
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_durable_parent(path)
     with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        acquire_file_lock(handle, fcntl.LOCK_EX)
         try:
             handle.seek(0)
             lines = [line.strip() for line in handle if line.strip()]
@@ -93,6 +98,7 @@ def append_execution_decision(
                     raise JournalIntegrityError(
                         "Intent ID was reused with different trade content."
                     )
+                establish_file_durability(handle, path)
                 return JournalAppendResult(
                     recorded=False,
                     duplicate=True,
@@ -118,8 +124,7 @@ def append_execution_decision(
 
             handle.seek(0, 2)
             handle.write(_canonical(payload) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+            establish_file_durability(handle, path)
             return JournalAppendResult(
                 recorded=True,
                 duplicate=False,
@@ -137,9 +142,110 @@ def read_execution_decisions(
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        acquire_file_lock(handle, fcntl.LOCK_SH)
         try:
             lines = [line.strip() for line in handle if line.strip()]
             return _validate_entries(lines)
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def read_validated_execution_decision(
+    *,
+    path: Path,
+    sequence: int,
+    entry_hash: str,
+    intent_id: str,
+    intent_fingerprint: str,
+) -> dict[str, object]:
+    """Return one fully validated journal entry matching an exact binding."""
+
+    entries = read_execution_decisions(path=path)
+    if sequence < 1 or sequence > len(entries):
+        raise JournalIntegrityError("Execution journal sequence does not exist.")
+    entry = entries[sequence - 1]
+    if entry.get("sequence") != sequence:
+        raise JournalIntegrityError("Execution journal sequence does not match.")
+    if entry.get("entry_hash") != entry_hash:
+        raise JournalIntegrityError("Execution journal entry hash does not match.")
+    if entry.get("intent_id") != intent_id:
+        raise JournalIntegrityError("Execution journal intent ID does not match.")
+    if entry.get("intent_fingerprint") != intent_fingerprint:
+        raise JournalIntegrityError(
+            "Execution journal intent fingerprint does not match."
+        )
+    decision = entry.get("decision")
+    if not isinstance(decision, dict):
+        raise JournalIntegrityError("Execution journal decision is invalid.")
+    if decision.get("intent_id") != intent_id:
+        raise JournalIntegrityError("Journal decision intent ID does not match.")
+    if decision.get("intent_fingerprint") != intent_fingerprint:
+        raise JournalIntegrityError(
+            "Journal decision intent fingerprint does not match."
+        )
+    return entry
+
+
+@contextmanager
+def locked_validated_execution_decision(
+    *,
+    path: Path,
+    sequence: int,
+    entry_hash: str,
+    intent_id: str,
+    intent_fingerprint: str,
+):
+    """Hold a shared lock around use of an exact execution-journal entry.
+
+    The journal is validated both before yielding and immediately before the
+    lock is released, closing validation/use races for cooperative writers and
+    detecting non-cooperative truncation before readiness can be returned.
+    """
+
+    if not path.exists():
+        raise JournalIntegrityError("Execution journal does not exist.")
+    with path.open("r", encoding="utf-8") as handle:
+        acquire_file_lock(handle, fcntl.LOCK_SH)
+        try:
+            def validate_locked() -> dict[str, object]:
+                handle.seek(0)
+                entries = _validate_entries(
+                    [line.strip() for line in handle if line.strip()]
+                )
+                if sequence < 1 or sequence > len(entries):
+                    raise JournalIntegrityError(
+                        "Execution journal sequence does not exist."
+                    )
+                entry = entries[sequence - 1]
+                if entry.get("entry_hash") != entry_hash:
+                    raise JournalIntegrityError(
+                        "Execution journal entry hash does not match."
+                    )
+                if entry.get("intent_id") != intent_id:
+                    raise JournalIntegrityError(
+                        "Execution journal intent ID does not match."
+                    )
+                if entry.get("intent_fingerprint") != intent_fingerprint:
+                    raise JournalIntegrityError(
+                        "Execution journal intent fingerprint does not match."
+                    )
+                decision = entry.get("decision")
+                if not isinstance(decision, dict):
+                    raise JournalIntegrityError(
+                        "Execution journal decision is invalid."
+                    )
+                if decision.get("intent_id") != intent_id:
+                    raise JournalIntegrityError(
+                        "Journal decision intent ID does not match."
+                    )
+                if decision.get("intent_fingerprint") != intent_fingerprint:
+                    raise JournalIntegrityError(
+                        "Journal decision intent fingerprint does not match."
+                    )
+                return entry
+
+            entry = validate_locked()
+            yield entry
+            validate_locked()
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

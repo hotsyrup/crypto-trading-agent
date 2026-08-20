@@ -97,6 +97,7 @@ class ExecutorRunResult:
     journal_recorded: bool
     duplicate_blocked: bool
     journal_sequence: int | None
+    journal_entry_hash: str | None
     ready_for_submission: bool = False
 
 
@@ -419,6 +420,7 @@ def process_shadow_trade_intent(
             journal_recorded=False,
             duplicate_blocked=False,
             journal_sequence=None,
+            journal_entry_hash=None,
         )
 
     if journal.duplicate:
@@ -433,6 +435,7 @@ def process_shadow_trade_intent(
             journal_recorded=False,
             duplicate_blocked=True,
             journal_sequence=journal.sequence,
+            journal_entry_hash=journal.entry_hash,
         )
 
     return ExecutorRunResult(
@@ -440,4 +443,5 @@ def process_shadow_trade_intent(
         journal_recorded=True,
         duplicate_blocked=False,
         journal_sequence=journal.sequence,
+        journal_entry_hash=journal.entry_hash,
     )
