@@ -28,15 +28,25 @@ ALLOWED_API_HOST = "api.dexscreener.com"
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 MAX_API_CANDIDATES = 30
 MAX_PROVIDER_ATTEMPTS = 3
+RESEARCH_SCHEMA_VERSION = 2
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 DEFAULT_WATCHLIST = (
     "0x4200000000000000000000000000000000000006",  # WETH on Base
     "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",  # USDC on Base
 )
+WETH_CONTRACT = DEFAULT_WATCHLIST[0]
+USDC_CONTRACT = DEFAULT_WATCHLIST[1]
+USDBC_CONTRACT = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+APPROVED_QUOTE_CONTRACTS = {
+    WETH_CONTRACT: {USDC_CONTRACT},
+    USDC_CONTRACT: {USDBC_CONTRACT},
+}
+DISCOVERY_QUOTE_CONTRACTS = {WETH_CONTRACT, USDC_CONTRACT, USDBC_CONTRACT}
 DISCOVERY_FEEDS = (
-    ("/token-profiles/latest/v1", "dexscreener_latest_profile"),
-    ("/token-boosts/latest/v1", "dexscreener_latest_boost"),
-    ("/token-boosts/top/v1", "dexscreener_top_boost"),
+    ("/token-profiles/latest/v1", "dexscreener_latest_profile", "profile"),
+    ("/token-boosts/latest/v1", "dexscreener_latest_boost", "boost"),
+    ("/token-boosts/top/v1", "dexscreener_top_boost", "boost"),
+    ("/ads/latest/v1", "dexscreener_latest_ad", "advertisement"),
 )
 
 STATE: dict[str, object] = {
@@ -101,12 +111,14 @@ def discover_base_contracts(
                 "profile_url": None,
                 "description": None,
                 "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
             }
         )
         if len(candidates) >= limit:
             return candidates
 
-    for path, source_name in DISCOVERY_FEEDS:
+    for path, source_name, promotion_type in DISCOVERY_FEEDS:
         payload = get_json(path)
         if not isinstance(payload, list):
             raise ValueError("DEX Screener discovery response must be a list.")
@@ -123,6 +135,8 @@ def discover_base_contracts(
                     "profile_url": profile.get("url"),
                     "description": profile.get("description"),
                     "discovery_source": source_name,
+                    "marketing_influenced": True,
+                    "promotion_type": promotion_type,
                 }
             )
             if len(candidates) >= limit:
@@ -137,10 +151,13 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
         raise ValueError("DEX Screener accepts at most 30 token addresses per batch.")
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
-    payload = get_json(f"/tokens/v1/base/{','.join(addresses)}")
-    if not isinstance(payload, list):
-        raise ValueError("DEX Screener pairs response must be a list.")
-    return [pair for pair in payload if isinstance(pair, dict)]
+    pairs: list[dict[str, object]] = []
+    for address in addresses:
+        payload = get_json(f"/token-pairs/v1/base/{address}")
+        if not isinstance(payload, list):
+            raise ValueError("DEX Screener token-pairs response must be a list.")
+        pairs.extend(pair for pair in payload if isinstance(pair, dict))
+    return pairs
 
 
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
@@ -149,24 +166,66 @@ def _pair_liquidity(pair: dict[str, object]) -> Decimal:
     return _decimal(value) or Decimal("0")
 
 
-def select_primary_pair(
+def _pair_has_complete_core_metrics(pair: dict[str, object]) -> bool:
+    volume = pair.get("volume") if isinstance(pair.get("volume"), dict) else {}
+    changes = pair.get("priceChange") if isinstance(pair.get("priceChange"), dict) else {}
+    transactions = pair.get("txns") if isinstance(pair.get("txns"), dict) else {}
+    h24_transactions = (
+        transactions.get("h24") if isinstance(transactions.get("h24"), dict) else {}
+    )
+    required = (
+        pair.get("priceUsd"),
+        _pair_liquidity(pair),
+        volume.get("h24"),
+        volume.get("h6"),
+        changes.get("h24"),
+        changes.get("h6"),
+        h24_transactions.get("buys"),
+        h24_transactions.get("sells"),
+        pair.get("pairCreatedAt"),
+    )
+    return all(value is not None for value in required)
+
+
+def eligible_base_pairs(
     contract_address: str,
     pairs: list[dict[str, object]],
-) -> dict[str, object] | None:
-    """Choose the most liquid Base pair where the researched token is base."""
+    approved_quote_addresses: set[str] | None = None,
+) -> list[dict[str, object]]:
+    """Return Base pools where the researched contract is the base token."""
     eligible = []
     for pair in pairs:
         base_token = pair.get("baseToken")
+        quote_token = pair.get("quoteToken")
         base_address = (
             str(base_token.get("address", ""))
             if isinstance(base_token, dict)
             else ""
         )
+        quote_address = (
+            str(quote_token.get("address", ""))
+            if isinstance(quote_token, dict)
+            else ""
+        )
         if (
             pair.get("chainId") == "base"
             and base_address.lower() == contract_address.lower()
+            and (
+                approved_quote_addresses is None
+                or quote_address.lower() in approved_quote_addresses
+            )
+            and _pair_has_complete_core_metrics(pair)
         ):
             eligible.append(pair)
+    return eligible
+
+
+def select_primary_pair(
+    contract_address: str,
+    pairs: list[dict[str, object]],
+) -> dict[str, object] | None:
+    """Choose the most liquid Base pair where the researched token is base."""
+    eligible = eligible_base_pairs(contract_address, pairs)
     return max(eligible, key=_pair_liquidity, default=None)
 
 
@@ -176,22 +235,27 @@ def build_packet(
     received_at: datetime,
     minimum_liquidity_usd: Decimal,
     freshness_minutes: int,
+    eligible_pair_count: int = 0,
 ) -> dict[str, object]:
     address = str(profile["contract_address"]).lower()
     warnings = [
-        "DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING",
         "CONTRACT_SECURITY_NOT_VERIFIED",
         "HOLDER_CONCENTRATION_NOT_VERIFIED",
     ]
+    if profile.get("marketing_influenced") is not False:
+        warnings.append("DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING")
     metrics: dict[str, object] = {}
     token = {}
     pair_address = None
     dex_id = None
+    base_contract_address = None
+    quote_contract_address = None
 
     if pair is None:
         warnings.append("NO_BASE_DENOMINATED_PAIR_FOUND")
     else:
         token = pair.get("baseToken") if isinstance(pair.get("baseToken"), dict) else {}
+        quote_token = pair.get("quoteToken") if isinstance(pair.get("quoteToken"), dict) else {}
         liquidity = _pair_liquidity(pair)
         volume = pair.get("volume") if isinstance(pair.get("volume"), dict) else {}
         changes = (
@@ -200,6 +264,7 @@ def build_packet(
             else {}
         )
         transactions = pair.get("txns") if isinstance(pair.get("txns"), dict) else {}
+        boosts = pair.get("boosts") if isinstance(pair.get("boosts"), dict) else {}
         h24_transactions = (
             transactions.get("h24")
             if isinstance(transactions.get("h24"), dict)
@@ -227,14 +292,24 @@ def build_packet(
             "buys_h24": h24_transactions.get("buys"),
             "sells_h24": h24_transactions.get("sells"),
             "pair_created_at": created_at.isoformat() if created_at else None,
+            "market_cap_usd": _plain_decimal(_decimal(pair.get("marketCap"))),
+            "fdv_usd": _plain_decimal(_decimal(pair.get("fdv"))),
+            "active_boosts": int(boosts.get("active", 0) or 0),
         }
-        if any(value is None for value in metrics.values()):
+        core_metric_names = {
+            "price_usd", "liquidity_usd", "volume_h24_usd", "volume_h6_usd",
+            "price_change_h24_percent", "price_change_h6_percent", "buys_h24",
+            "sells_h24", "pair_created_at",
+        }
+        if any(metrics[name] is None for name in core_metric_names):
             warnings.append("MARKET_FIELDS_INCOMPLETE")
         pair_address = pair.get("pairAddress")
         dex_id = pair.get("dexId")
+        base_contract_address = str(token.get("address", "")).lower() or None
+        quote_contract_address = str(quote_token.get("address", "")).lower() or None
 
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": RESEARCH_SCHEMA_VERSION,
         "network": "base",
         "contract_address": address,
         "symbol": token.get("symbol"),
@@ -247,6 +322,11 @@ def build_packet(
             "provider": "dexscreener",
             "discovery": profile["discovery_source"],
             "profile_url": profile.get("profile_url"),
+            "marketing_influenced": profile.get("marketing_influenced") is not False,
+            "promotion_type": profile.get("promotion_type"),
+            "eligible_pair_count": eligible_pair_count,
+            "base_contract_address": base_contract_address,
+            "quote_contract_address": quote_contract_address,
         },
         "metrics": metrics,
         "warnings": sorted(set(warnings)),
@@ -368,16 +448,24 @@ def run_research_cycle() -> int:
     profiles = discover_base_contracts(limit, watchlist)
     addresses = [str(profile["contract_address"]) for profile in profiles]
     pairs = fetch_pairs(addresses)
-    packets = [
-        build_packet(
-            profile,
-            select_primary_pair(str(profile["contract_address"]), pairs),
-            received_at,
-            minimum_liquidity,
-            freshness,
+    packets = []
+    for profile in profiles:
+        contract_address = str(profile["contract_address"])
+        approved_quotes = APPROVED_QUOTE_CONTRACTS.get(
+            contract_address,
+            DISCOVERY_QUOTE_CONTRACTS,
         )
-        for profile in profiles
-    ]
+        eligible = eligible_base_pairs(contract_address, pairs, approved_quotes)
+        packets.append(
+            build_packet(
+                profile,
+                max(eligible, key=_pair_liquidity, default=None),
+                received_at,
+                minimum_liquidity,
+                freshness,
+                len(eligible),
+            )
+        )
     inserted = store_packets(database_path, packets)
     STATE.update(
         status="healthy",
@@ -392,7 +480,7 @@ def run_research_cycle() -> int:
 def public_health_state() -> dict[str, object]:
     return {
         "service": "lumen-base-research-agent",
-        "schema_version": 1,
+        "schema_version": RESEARCH_SCHEMA_VERSION,
         "mode": STATE["mode"],
         "status": STATE["status"],
         "last_cycle_at": STATE["last_cycle_at"],
@@ -410,7 +498,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             *_, database_path, _ = load_config()
             response = {
                 "service": "lumen-base-research-agent",
-                "schema_version": 1,
+                "schema_version": RESEARCH_SCHEMA_VERSION,
                 "mode": "observation_only",
                 "execution": "disabled",
                 "generated_at": _utc_now().isoformat(),

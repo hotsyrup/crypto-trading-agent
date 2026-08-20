@@ -22,19 +22,13 @@ USDC_CONTRACT = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 REQUIRED_CONTRACTS = {WETH_CONTRACT, USDC_CONTRACT}
 EXPECTED_SYMBOLS = {WETH_CONTRACT: "WETH", USDC_CONTRACT: "USDC"}
 EXPECTED_NAMES = {WETH_CONTRACT: "Wrapped Ether", USDC_CONTRACT: "USD Coin"}
-APPROVED_MARKETS = {
-    WETH_CONTRACT: (
-        "pancakeswap",
-        "0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38",
-    ),
-    USDC_CONTRACT: (
-        "quickswap",
-        "0x5d0bc342178c8fe2c2f9a9fcc9d52555c99936db",
-    ),
+USDBC_CONTRACT = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+APPROVED_QUOTE_CONTRACTS = {
+    WETH_CONTRACT: USDC_CONTRACT,
+    USDC_CONTRACT: USDBC_CONTRACT,
 }
 REQUIRED_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
-    "DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
 }
 REQUIRED_METRICS = {
@@ -54,6 +48,17 @@ MAX_PACKET_LIFETIME = timedelta(minutes=120)
 MIN_PACKET_LIFETIME = timedelta(minutes=5)
 MAX_GENERATED_AGE = timedelta(minutes=10)
 MAX_FUTURE_SKEW = timedelta(seconds=30)
+RESEARCH_SCHEMA_VERSION = 2
+ENVELOPE_FIELDS = {
+    "service", "schema_version", "mode", "execution", "generated_at", "packets",
+}
+PACKET_FIELDS = {
+    "schema_version", "network", "contract_address", "symbol", "name",
+    "pair_address", "dex_id", "received_at", "expires_at", "source", "metrics",
+    "warnings", "data_quality", "recommendation", "execution_authorized",
+    "packet_id", "is_stale",
+}
+ENRICHMENT_METRICS = {"market_cap_usd", "fdv_usd", "active_boosts"}
 
 
 @dataclass(frozen=True)
@@ -118,7 +123,7 @@ def _validate_metrics(
     *,
     received_at: datetime,
 ) -> None:
-    if not isinstance(metrics, dict) or set(metrics) != REQUIRED_METRICS:
+    if not isinstance(metrics, dict) or set(metrics) != REQUIRED_METRICS | ENRICHMENT_METRICS:
         raise ValueError("market metrics are incomplete or unexpected")
     if any(metrics[field] is None for field in REQUIRED_METRICS):
         raise ValueError("market metrics contain null values")
@@ -137,6 +142,10 @@ def _validate_metrics(
     )
     _nonnegative_integer(metrics["buys_h24"], "buys_h24")
     _nonnegative_integer(metrics["sells_h24"], "sells_h24")
+    _nonnegative_integer(metrics["active_boosts"], "active_boosts")
+    for field in ("market_cap_usd", "fdv_usd"):
+        if metrics[field] is not None and _finite_decimal(metrics[field], field) < 0:
+            raise ValueError(f"Research {field} cannot be negative.")
     pair_created_at = _aware_timestamp(metrics["pair_created_at"], "pair_created_at")
 
     if contract == USDC_CONTRACT and not Decimal("0.95") <= price <= Decimal("1.05"):
@@ -162,14 +171,18 @@ def _validate_packet(
 ) -> tuple[str, datetime]:
     if not isinstance(packet, dict):
         raise ValueError("packet is not an object")
+    if set(packet) != PACKET_FIELDS:
+        raise ValueError("packet fields do not match the strict research contract")
     received_at = _aware_timestamp(packet.get("received_at"), "received_at")
     expires_at = _aware_timestamp(packet.get("expires_at"), "expires_at")
     packet_id = str(packet.get("packet_id", ""))
     source = packet.get("source")
     warnings = packet.get("warnings")
-    approved_dex, approved_pair = APPROVED_MARKETS[contract]
 
-    if type(packet.get("schema_version")) is not int or packet.get("schema_version") != 1:
+    if (
+        type(packet.get("schema_version")) is not int
+        or packet.get("schema_version") != RESEARCH_SCHEMA_VERSION
+    ):
         raise ValueError("packet schema is not approved")
     if not PACKET_ID_PATTERN.fullmatch(packet_id) or packet_id != _packet_digest(packet):
         raise ValueError("packet digest does not match its contents")
@@ -182,17 +195,33 @@ def _validate_packet(
         raise ValueError("token symbol does not match the approved contract")
     if packet.get("name") != EXPECTED_NAMES[contract]:
         raise ValueError("token name does not match the approved contract")
-    if packet.get("dex_id") != approved_dex:
-        raise ValueError("DEX is not approved for this research market")
+    if not isinstance(packet.get("dex_id"), str) or not packet.get("dex_id"):
+        raise ValueError("DEX identity is unavailable")
     pair_address = str(packet.get("pair_address", "")).lower()
-    if not ADDRESS_PATTERN.fullmatch(pair_address) or pair_address != approved_pair:
-        raise ValueError("pair address is not approved for this contract")
-    if source != {
-        "provider": "dexscreener",
-        "discovery": "configured_watchlist",
-        "profile_url": None,
+    if not ADDRESS_PATTERN.fullmatch(pair_address):
+        raise ValueError("pair address is invalid")
+    if not isinstance(source, dict) or set(source) != {
+        "provider", "discovery", "profile_url", "marketing_influenced",
+        "promotion_type", "eligible_pair_count", "base_contract_address",
+        "quote_contract_address",
     }:
+        raise ValueError("research source fields do not match the strict contract")
+    if (
+        source.get("provider") != "dexscreener"
+        or source.get("discovery") != "configured_watchlist"
+        or source.get("profile_url") is not None
+        or source.get("marketing_influenced") is not False
+        or source.get("promotion_type") is not None
+    ):
         raise ValueError("research provider or discovery source is not approved")
+    if (
+        str(source.get("base_contract_address", "")).lower() != contract
+        or str(source.get("quote_contract_address", "")).lower()
+        != APPROVED_QUOTE_CONTRACTS[contract]
+    ):
+        raise ValueError("research pool asset identities are not approved")
+    if _nonnegative_integer(source.get("eligible_pair_count"), "eligible_pair_count") < 1:
+        raise ValueError("research source did not compare an eligible Base pool")
     if packet.get("data_quality") != "complete":
         raise ValueError("data_quality must be complete")
     if (
@@ -242,10 +271,12 @@ def evaluate_research_payload(
     current_time = current_time.astimezone(timezone.utc)
     if not isinstance(payload, dict):
         return ResearchEvidence(False, "Research response is not an object.")
+    if set(payload) != ENVELOPE_FIELDS:
+        return ResearchEvidence(False, "Research response fields do not match the strict contract.")
     if (
         payload.get("service") != "lumen-base-research-agent"
         or type(payload.get("schema_version")) is not int
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") != RESEARCH_SCHEMA_VERSION
         or payload.get("mode") != "observation_only"
         or payload.get("execution") != "disabled"
     ):

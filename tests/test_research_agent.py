@@ -13,6 +13,8 @@ from unittest.mock import patch
 from app.research_agent import (
     build_packet,
     discover_base_contracts,
+    eligible_base_pairs,
+    fetch_pairs,
     get_json,
     load_latest_packets,
     load_config,
@@ -38,6 +40,9 @@ def sample_pair(liquidity: str = "100000") -> dict[str, object]:
         "priceChange": {"h24": "4", "h6": "1"},
         "txns": {"h24": {"buys": 120, "sells": 90}},
         "pairCreatedAt": 1750000000000,
+        "marketCap": "1250000",
+        "fdv": "1500000",
+        "boosts": {"active": 3},
     }
 
 
@@ -77,6 +82,20 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(path, Path("data/research_packets.sqlite3"))
         self.assertEqual(len(watchlist), 2)
 
+    @patch("app.research_agent.get_json")
+    def test_fetch_pairs_uses_all_pools_endpoint_for_each_candidate(self, get_json) -> None:
+        get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
+        second = "0x0000000000000000000000000000000000000002"
+        pairs = fetch_pairs([ADDRESS, second])
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(
+            [call.args[0] for call in get_json.call_args_list],
+            [
+                f"/token-pairs/v1/base/{ADDRESS}",
+                f"/token-pairs/v1/base/{second}",
+            ],
+        )
+
     def test_paid_and_execution_flags_fail_closed(self) -> None:
         for flag in ("LIVE_TRADING_ENABLED", "BANKR_ENABLED", "AIXBT_ENABLED"):
             with self.subTest(flag=flag):
@@ -100,6 +119,8 @@ class ResearchAgentTests(unittest.TestCase):
                     "profile_url": "https://example.test",
                     "description": None,
                     "discovery_source": "dexscreener_latest_profile",
+                    "marketing_influenced": True,
+                    "promotion_type": "profile",
                 }
             ],
         )
@@ -110,6 +131,13 @@ class ResearchAgentTests(unittest.TestCase):
         high["pairAddress"] = "0x0000000000000000000000000000000000000004"
         wrong_chain = {**sample_pair("999999"), "chainId": "ethereum"}
         self.assertIs(select_primary_pair(ADDRESS, [low, high, wrong_chain]), high)
+        self.assertEqual(eligible_base_pairs(ADDRESS, [low, high, wrong_chain]), [low, high])
+
+    def test_incomplete_pool_is_not_eligible_even_when_more_liquid(self) -> None:
+        complete = sample_pair("100")
+        incomplete = sample_pair("999999")
+        incomplete["pairCreatedAt"] = None
+        self.assertEqual(eligible_base_pairs(ADDRESS, [complete, incomplete]), [complete])
 
     def test_packet_is_expiring_observation_not_execution(self) -> None:
         now = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)
@@ -118,18 +146,46 @@ class ResearchAgentTests(unittest.TestCase):
                 "contract_address": ADDRESS,
                 "profile_url": "https://dexscreener.com/base/example",
                 "discovery_source": "dexscreener_latest_profile",
+                "marketing_influenced": True,
+                "promotion_type": "profile",
             },
             sample_pair(),
             now,
             Decimal("50000"),
             90,
+            2,
         )
+        self.assertEqual(packet["schema_version"], 2)
         self.assertEqual(packet["recommendation"], "OBSERVE_ONLY")
         self.assertFalse(packet["execution_authorized"])
         self.assertEqual(packet["metrics"]["liquidity_usd"], "100000")
         self.assertEqual(packet["expires_at"], "2026-08-10T21:30:00+00:00")
         self.assertIn("CONTRACT_SECURITY_NOT_VERIFIED", packet["warnings"])
+        self.assertTrue(packet["source"]["marketing_influenced"])
+        self.assertEqual(packet["source"]["promotion_type"], "profile")
+        self.assertEqual(packet["source"]["eligible_pair_count"], 2)
+        self.assertEqual(packet["metrics"]["market_cap_usd"], "1250000")
+        self.assertEqual(packet["metrics"]["fdv_usd"], "1500000")
+        self.assertEqual(packet["metrics"]["active_boosts"], 3)
         self.assertEqual(len(packet["packet_id"]), 64)
+
+    def test_watchlist_packet_is_not_labeled_as_promotional_discovery(self) -> None:
+        packet = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+            1,
+        )
+        self.assertFalse(packet["source"]["marketing_influenced"])
+        self.assertNotIn("DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING", packet["warnings"])
 
     def test_missing_pair_is_partial_and_not_invented(self) -> None:
         packet = build_packet(

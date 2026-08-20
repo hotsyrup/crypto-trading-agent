@@ -245,6 +245,13 @@ marketing, and the worker does not claim to verify contract safety or holder
 concentration. The default watchlist guarantees coverage of Base WETH and
 USDC even when the latest-profile feeds contain no Base projects.
 
+Research packet schema version 2 records the number of eligible Base pools
+considered before selecting the most-liquid pool, nullable market-cap and FDV
+values, active boosts, and whether discovery came from a profile, boost, or
+advertisement. The strict trading reader accepts only non-promotional
+configured-watchlist evidence with exact approved base and quote contracts;
+these additional observations do not create a trading instruction.
+
 Run one local cycle:
 
 ```bash

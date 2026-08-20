@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 from app.research_feed import (
-    APPROVED_MARKETS,
+    APPROVED_QUOTE_CONTRACTS,
     REQUIRED_CONTRACTS,
     USDC_CONTRACT,
     WETH_CONTRACT,
@@ -12,13 +12,19 @@ from app.research_feed import (
 )
 
 
+TEST_MARKETS = {
+    WETH_CONTRACT: ("uniswap", "0x6c561b446416e1a00e8e93e221854d6ea4171372"),
+    USDC_CONTRACT: ("aerodrome", "0x98c7a2338336d2d354663246f64676009c7bda97"),
+}
+
+
 class ResearchFeedTests(unittest.TestCase):
     now = datetime(2026, 8, 12, 20, 0, tzinfo=timezone.utc)
 
     def packet(self, contract):
-        dex_id, pair_address = APPROVED_MARKETS[contract]
+        dex_id, pair_address = TEST_MARKETS[contract]
         packet = {
-            "schema_version": 1,
+            "schema_version": 2,
             "network": "base",
             "contract_address": contract,
             "symbol": "WETH" if contract == WETH_CONTRACT else "USDC",
@@ -31,6 +37,11 @@ class ResearchFeedTests(unittest.TestCase):
                 "provider": "dexscreener",
                 "discovery": "configured_watchlist",
                 "profile_url": None,
+                "marketing_influenced": False,
+                "promotion_type": None,
+                "eligible_pair_count": 2,
+                "base_contract_address": contract,
+                "quote_contract_address": APPROVED_QUOTE_CONTRACTS[contract],
             },
             "metrics": {
                 "price_usd": "2000" if contract == WETH_CONTRACT else "1.00",
@@ -42,10 +53,12 @@ class ResearchFeedTests(unittest.TestCase):
                 "pair_created_at": "2025-01-01T00:00:00+00:00",
                 "buys_h24": 10,
                 "sells_h24": 10,
+                "market_cap_usd": "1000000",
+                "fdv_usd": "1100000",
+                "active_boosts": 0,
             },
             "warnings": [
                 "CONTRACT_SECURITY_NOT_VERIFIED",
-                "DISCOVERY_SOURCE_MAY_REFLECT_TOKEN_MARKETING",
                 "HOLDER_CONCENTRATION_NOT_VERIFIED",
             ],
             "data_quality": "complete",
@@ -59,7 +72,7 @@ class ResearchFeedTests(unittest.TestCase):
     def payload(self):
         return {
             "service": "lumen-base-research-agent",
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "observation_only",
             "execution": "disabled",
             "generated_at": self.now.isoformat(),
@@ -116,9 +129,32 @@ class ResearchFeedTests(unittest.TestCase):
     def test_wrong_provider_pair_and_dex_fail_closed(self):
         mutations = (
             lambda packet: packet["source"].update(provider="unknown"),
-            lambda packet: packet.update(pair_address="0x" + "1" * 40),
-            lambda packet: packet.update(dex_id="unknown"),
+            lambda packet: packet.update(pair_address="not-a-pair"),
+            lambda packet: packet.update(dex_id=""),
             lambda packet: packet.update(name="Copied Ether"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                payload = self.payload()
+                self.mutate(payload, WETH_CONTRACT, mutation)
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_unapproved_pool_asset_identity_fails_closed(self):
+        payload = self.payload()
+        self.mutate(
+            payload,
+            WETH_CONTRACT,
+            lambda packet: packet["source"].update(
+                quote_contract_address="0x" + "1" * 40
+            ),
+        )
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_promotional_or_poolless_watchlist_source_fails_closed(self):
+        mutations = (
+            lambda packet: packet["source"].update(marketing_influenced=True),
+            lambda packet: packet["source"].update(promotion_type="boost"),
+            lambda packet: packet["source"].update(eligible_pair_count=0),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -142,6 +178,32 @@ class ResearchFeedTests(unittest.TestCase):
                     ),
                 )
                 self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_invalid_enrichment_metrics_fail_closed(self):
+        for field, value in (
+            ("market_cap_usd", "-1"),
+            ("fdv_usd", "NaN"),
+            ("active_boosts", -1),
+        ):
+            with self.subTest(field=field):
+                payload = self.payload()
+                self.mutate(
+                    payload,
+                    WETH_CONTRACT,
+                    lambda packet, field=field, value=value: packet["metrics"].update(
+                        {field: value}
+                    ),
+                )
+                self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+    def test_unexpected_packet_or_envelope_fields_fail_closed(self):
+        payload = self.payload()
+        payload["trade_now"] = True
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
+
+        payload = self.payload()
+        self.mutate(payload, WETH_CONTRACT, lambda packet: packet.update(order_size="all"))
+        self.assertFalse(evaluate_research_payload(payload, now=self.now).ready)
 
     def test_stale_future_and_overlong_packets_fail_closed(self):
         changes = (
