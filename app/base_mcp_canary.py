@@ -4,9 +4,10 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from app.live_trading_config import BASE_USDC_ADDRESS, LiveTradingConfig
 from app.trading_executor import (
@@ -14,8 +15,12 @@ from app.trading_executor import (
     BASE_MAINNET_CHAIN_ID,
     STATUS_SHADOW_APPROVED,
     ExecutionDecision,
+    ExecutorConfig,
+    RiskSnapshot,
     TradeIntent,
+    evaluate_trade_intent,
     intent_fingerprint,
+    process_shadow_trade_intent,
 )
 
 
@@ -23,6 +28,7 @@ CANARY_MODE_PREPARE_ONLY = "prepare_only"
 CANARY_KILL_SWITCH_ARMED = "armed"
 CANARY_KILL_SWITCH_HALTED = "halted"
 STATUS_BLOCKED = "BLOCKED"
+STATUS_CANDIDATE = "CANDIDATE"
 STATUS_READY = "READY_FOR_HUMAN_APPROVAL"
 CANARY_NOTIONAL_USDC = Decimal("1.00")
 DEFAULT_APPROVAL_TTL_SECONDS = 300
@@ -145,6 +151,10 @@ def _is_aware(value: datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() is not None
 
 
+def _trusted_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _canonical(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -174,7 +184,7 @@ def _blocked(
     )
 
 
-def prepare_base_mcp_canary(
+def _build_base_mcp_canary_candidate(
     intent: TradeIntent,
     decision: ExecutionDecision,
     *,
@@ -182,15 +192,14 @@ def prepare_base_mcp_canary(
     journal_entry_hash: str,
     live_config: LiveTradingConfig,
     canary_config: BaseMcpCanaryConfig | None = None,
-    now: datetime | None = None,
+    prepared_at: datetime,
 ) -> BaseMcpCanaryPreparation:
-    """Prepare an exact Base MCP request without calling Base MCP.
+    """Build a non-ready request candidate without calling Base MCP.
 
-    The returned object is a human-review package. It contains no approval
-    URL, request ID, signature, transaction, calldata, or submission method.
+    This helper cannot confer readiness. Only the composed audit path may
+    promote its candidate after both journals are durably validated.
     """
 
-    prepared_at = now or datetime.now(timezone.utc)
     reasons: list[str] = []
     try:
         config = canary_config or load_base_mcp_canary_config()
@@ -294,9 +303,9 @@ def prepare_base_mcp_canary(
     ).hexdigest()
     canary_id = f"base-canary-{request_digest[:24]}"
     return BaseMcpCanaryPreparation(
-        status=STATUS_READY,
+        status=STATUS_CANDIDATE,
         reasons=(
-            "Exact request is ready to be shown to Ben before Base MCP is called.",
+            "Exact request candidate awaits durable audit completion.",
         ),
         canary_id=canary_id,
         intent_id=intent.intent_id,
@@ -308,5 +317,158 @@ def prepare_base_mcp_canary(
         prepared_at=prepared_at,
         expires_at=expires_at,
         request=request,
+    )
+
+
+def prepare_base_mcp_canary(
+    intent: TradeIntent,
+    risk: RiskSnapshot,
+    *,
+    execution_journal_path: Path,
+    canary_journal_path: Path,
+    live_config: LiveTradingConfig,
+    executor_config: ExecutorConfig,
+    canary_config: BaseMcpCanaryConfig | None = None,
+) -> BaseMcpCanaryPreparation:
+    """Validate, audit-bind, and durably record one prepare-only canary.
+
+    This is the sole safe preparation entry point. It never calls Base MCP and
+    cannot create an approval, transaction, signature, or submission.
+    """
+
+    from app.base_mcp_canary_journal import (
+        CanaryJournalIntegrityError,
+        EVENT_PREPARED,
+        append_canary_event,
+    )
+    from app.execution_journal import (
+        JournalIntegrityError,
+        read_validated_execution_decision,
+    )
+
+    current_time = _trusted_utc_now()
+    run = process_shadow_trade_intent(
+        intent,
+        risk,
+        journal_path=execution_journal_path,
+        now=current_time,
+        live_config=live_config,
+        executor_config=executor_config,
+    )
+    fingerprint = intent_fingerprint(intent)
+    fallback_expires = current_time + timedelta(
+        seconds=(
+            canary_config.approval_ttl_seconds
+            if canary_config is not None
+            else DEFAULT_APPROVAL_TTL_SECONDS
+        )
+    )
+    if run.journal_sequence is None or run.journal_entry_hash is None:
+        return _blocked(
+            reasons=["A durable execution-journal decision is required."],
+            intent=intent,
+            journal_sequence=0,
+            journal_entry_hash="",
+            prepared_at=current_time,
+            expires_at=fallback_expires,
+        )
+
+    expected_decision = evaluate_trade_intent(
+        intent,
+        risk,
+        now=current_time,
+        live_config=live_config,
+        executor_config=executor_config,
+    )
+    try:
+        entry = read_validated_execution_decision(
+            path=execution_journal_path,
+            sequence=run.journal_sequence,
+            entry_hash=run.journal_entry_hash,
+            intent_id=intent.intent_id,
+            intent_fingerprint=fingerprint,
+        )
+        stored_decision = entry["decision"]
+        if _canonical(stored_decision) != _canonical(asdict(expected_decision)):
+            raise JournalIntegrityError(
+                "Execution journal decision does not match current validation."
+            )
+        if stored_decision.get("status") != STATUS_SHADOW_APPROVED:
+            raise JournalIntegrityError(
+                "Execution journal decision is not SHADOW_APPROVED."
+            )
+        recorded_at = datetime.fromisoformat(str(entry["recorded_at"]))
+        if not _is_aware(recorded_at):
+            raise JournalIntegrityError(
+                "Execution journal timestamp must include a timezone."
+            )
+    except (JournalIntegrityError, OSError, ValueError, KeyError) as error:
+        return _blocked(
+            reasons=[f"Execution journal binding failed: {error}"],
+            intent=intent,
+            journal_sequence=run.journal_sequence,
+            journal_entry_hash=run.journal_entry_hash,
+            prepared_at=current_time,
+            expires_at=fallback_expires,
+        )
+
+    preparation = _build_base_mcp_canary_candidate(
+        intent,
+        expected_decision,
+        journal_sequence=run.journal_sequence,
+        journal_entry_hash=run.journal_entry_hash,
+        live_config=live_config,
+        canary_config=canary_config,
+        prepared_at=recorded_at,
+    )
+    if preparation.status != STATUS_CANDIDATE:
+        return preparation
+    if current_time >= preparation.expires_at:
+        return _blocked(
+            reasons=["Canary preparation is already expired."],
+            intent=intent,
+            journal_sequence=run.journal_sequence,
+            journal_entry_hash=run.journal_entry_hash,
+            prepared_at=preparation.prepared_at,
+            expires_at=preparation.expires_at,
+        )
+
+    try:
+        decision_digest = hashlib.sha256(
+            _canonical(stored_decision).encode("utf-8")
+        ).hexdigest()
+        append_canary_event(
+            canary_id=preparation.canary_id,
+            request_digest=preparation.request_digest,
+            event=EVENT_PREPARED,
+            path=canary_journal_path,
+            recorded_at=current_time,
+            intent_id=intent.intent_id,
+            intent_fingerprint=fingerprint,
+            execution_journal_sequence=run.journal_sequence,
+            execution_journal_entry_hash=run.journal_entry_hash,
+            execution_decision_digest=decision_digest,
+            execution_journal_path=execution_journal_path,
+        )
+    except (
+        CanaryJournalIntegrityError,
+        JournalIntegrityError,
+        OSError,
+        ValueError,
+    ) as error:
+        return _blocked(
+            reasons=[f"Canary PREPARED journal write failed: {error}"],
+            intent=intent,
+            journal_sequence=run.journal_sequence,
+            journal_entry_hash=run.journal_entry_hash,
+            prepared_at=preparation.prepared_at,
+            expires_at=preparation.expires_at,
+        )
+    return replace(
+        preparation,
+        status=STATUS_READY,
+        reasons=(
+            "Exact request is ready to be shown to Ben before Base MCP is called.",
+        ),
         ready_to_request_human_approval=True,
     )

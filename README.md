@@ -158,6 +158,17 @@ an approval link, construct calldata, sign, submit, or move funds. It requires
 its independent `BASE_MCP_CANARY_KILL_SWITCH` to `halted`. Base Account on
 Ben's device remains the only approval and signing boundary.
 
+The composed preparation API evaluates and records the decision, re-validates
+the complete execution-journal hash chain and the exact intent, fingerprint,
+`SHADOW_APPROVED` decision, sequence, and entry hash, then durably appends the
+canary's `PREPARED` lifecycle event. It returns readiness only after all of
+those steps succeed. Safe retries reuse the same audit-bound preparation.
+The cooperative lock model uses bounded acquisition and revalidates the
+execution journal after `PREPARED` is durable. Every append or validated
+duplicate re-establishes file and containing-directory durability. Complete-tail
+rollback is not yet protected by an independent durable head checkpoint; that
+remains a blocker before any live execution path.
+
 `app.base_mcp_canary_journal` records the future canary lifecycle as a locked,
 hash-chained state machine: `PREPARED`, `APPROVAL_REQUESTED`, then one terminal
 or explicitly ambiguous outcome. It blocks skipped approval, mismatched Base

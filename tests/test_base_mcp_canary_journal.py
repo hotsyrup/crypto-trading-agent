@@ -1,8 +1,11 @@
 import json
+import hashlib
 import tempfile
 import unittest
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from app.base_mcp_canary_journal import (
     EVENT_AMBIGUOUS,
@@ -14,6 +17,8 @@ from app.base_mcp_canary_journal import (
     append_canary_event,
     read_canary_events,
 )
+from app.execution_journal import append_execution_decision
+from app.trading_executor import ExecutionDecision, STATUS_SHADOW_APPROVED
 
 
 NOW = datetime(2026, 8, 20, 5, 0, tzinfo=timezone.utc)
@@ -21,16 +26,49 @@ CANARY_ID = "base-canary-001"
 DIGEST = "a" * 64
 REQUEST_ID = "base-request-001"
 TX_HASH = "0x" + "b" * 64
+INTENT_ID = "intent-001"
+INTENT_FINGERPRINT = "c" * 64
 
 
 class BaseMcpCanaryJournalTests(unittest.TestCase):
     def append(self, path: Path, event: str, **updates: object):
+        binding = {}
+        if event == EVENT_PREPARED:
+            decision = ExecutionDecision(
+                status=STATUS_SHADOW_APPROVED,
+                reasons=("validated",),
+                intent_id=INTENT_ID,
+                intent_fingerprint=INTENT_FINGERPRINT,
+            )
+            execution_path = path.with_name("execution.jsonl")
+            execution = append_execution_decision(
+                decision,
+                path=execution_path,
+                recorded_at=NOW,
+            )
+            decision_payload = asdict(decision)
+            decision_digest = hashlib.sha256(
+                json.dumps(
+                    decision_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            binding = {
+                "intent_id": INTENT_ID,
+                "intent_fingerprint": INTENT_FINGERPRINT,
+                "execution_journal_sequence": execution.sequence,
+                "execution_journal_entry_hash": execution.entry_hash,
+                "execution_decision_digest": decision_digest,
+                "execution_journal_path": execution_path,
+            }
         return append_canary_event(
             canary_id=CANARY_ID,
             request_digest=DIGEST,
             event=event,
             path=path,
             recorded_at=NOW,
+            **binding,
             **updates,
         )
 
@@ -43,6 +81,35 @@ class BaseMcpCanaryJournalTests(unittest.TestCase):
         self.assertTrue(first.recorded)
         self.assertTrue(duplicate.duplicate)
         self.assertEqual(len(events), 1)
+
+    def test_canary_file_directory_fsync_follows_content_fsync(self) -> None:
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "canary.jsonl"
+            with patch(
+                "app.journal_lock.os.fsync",
+                side_effect=lambda descriptor: events.append("file"),
+            ), patch(
+                "app.journal_lock.fsync_containing_directory",
+                side_effect=lambda selected: events.append("directory"),
+            ):
+                self.append(path, EVENT_PREPARED)
+        self.assertEqual(events[-2:], ["file", "directory"])
+
+    def test_prepared_requires_verified_execution_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "canary.jsonl"
+            with self.assertRaisesRegex(
+                ValueError,
+                "verified execution journal binding",
+            ):
+                append_canary_event(
+                    canary_id=CANARY_ID,
+                    request_digest=DIGEST,
+                    event=EVENT_PREPARED,
+                    path=path,
+                    recorded_at=NOW,
+                )
 
     def test_valid_lifecycle_records_request_and_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -150,6 +217,7 @@ class BaseMcpCanaryJournalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "canary.jsonl"
             self.append(path, EVENT_PREPARED)
+            prepared = read_canary_events(path=path)[0]
             with self.assertRaisesRegex(
                 CanaryJournalIntegrityError,
                 "different request digest",
@@ -160,6 +228,18 @@ class BaseMcpCanaryJournalTests(unittest.TestCase):
                     event=EVENT_PREPARED,
                     path=path,
                     recorded_at=NOW,
+                    intent_id=str(prepared["intent_id"]),
+                    intent_fingerprint=str(prepared["intent_fingerprint"]),
+                    execution_journal_sequence=int(
+                        prepared["execution_journal_sequence"]
+                    ),
+                    execution_journal_entry_hash=str(
+                        prepared["execution_journal_entry_hash"]
+                    ),
+                    execution_decision_digest=str(
+                        prepared["execution_decision_digest"]
+                    ),
+                    execution_journal_path=path.with_name("execution.jsonl"),
                 )
 
     def test_completed_event_requires_transaction_hash(self) -> None:
