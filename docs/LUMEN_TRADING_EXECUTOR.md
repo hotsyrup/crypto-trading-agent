@@ -65,6 +65,33 @@ semantics across crashes and provider timeouts.
 6. Complete shadow acceptance, adversarial restart tests, and a separately
    approved bounded live-canary plan.
 
+## Base MCP Interactive Canary Boundary
+
+The first bounded implementation is intentionally interactive rather than
+unattended. `app.base_mcp_canary` converts an exact 1.00-USDC BUY intent into
+an expiring Base MCP `swap` argument package only after the existing executor
+has shadow-approved the same fingerprint and the decision has a valid journal
+sequence and entry hash. It pins Base mainnet, the adopted treasury, official
+Base USDC with six decimals, native ETH, and the treasury return boundary.
+
+The preparation object always remains non-executable. It contains no Base MCP
+request ID, approval URL, quote, signature, calldata, transaction, or wallet
+credential. Calling Base MCP remains a later, explicit Lumen action; approving
+the resulting request remains Ben's action in Base Account.
+
+`app.base_mcp_canary_journal` provides a separate hash-chained lifecycle for
+preparation, approval request, and reconciliation. It cannot skip directly
+from preparation to completion, requires one stable Base request ID, requires
+a transaction hash for completion, permits an ambiguous provider outcome to
+be reconciled exactly once, and fails closed on corruption or invalid
+transitions.
+
+The Base MCP interface does not expose a deterministic quote-only call with a
+bot-enforced slippage field. Therefore the phone approval screen remains the
+place where Ben must review the provider route and expected output for this
+interactive canary. This boundary is not evidence that unattended execution
+is ready.
+
 ## Buzz Team Review Boundary
 
 Fizz may review implementation and recovery logic. Honey may review monitoring,
@@ -73,4 +100,4 @@ safety claims and identify missing evidence. Their work is advisory and
 read-only: it grants no repository writes, deployment actions, wallet access,
 signing authority, trades, approvals, transfers, or permission changes.
 
-Last updated: 2026-08-08
+Last updated: 2026-08-20

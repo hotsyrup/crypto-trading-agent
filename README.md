@@ -144,6 +144,28 @@ allowance, swap, RPC write, transaction construction, or broadcast method. A
 `SHADOW_APPROVED` decision is evidence that policy checks passed—not permission
 or ability to trade.
 
+## Base MCP Canary Preparation Boundary
+
+`app.base_mcp_canary` adds a separate, default-halted preparation boundary for
+the first Base-treasury canary. It can bind one fresh, journaled,
+shadow-approved BUY intent to exactly 1.00 USDC of official Base USDC for
+native ETH on Base. The resulting package expires after five minutes and
+contains the exact arguments that would later be supplied to Base MCP.
+
+Preparation is not a swap request. The module cannot contact Base MCP, create
+an approval link, construct calldata, sign, submit, or move funds. It requires
+`LIVE_TRADING_ENABLED=false`, supports `prepare_only` mode only, and defaults
+its independent `BASE_MCP_CANARY_KILL_SWITCH` to `halted`. Base Account on
+Ben's device remains the only approval and signing boundary.
+
+`app.base_mcp_canary_journal` records the future canary lifecycle as a locked,
+hash-chained state machine: `PREPARED`, `APPROVAL_REQUESTED`, then one terminal
+or explicitly ambiguous outcome. It blocks skipped approval, mismatched Base
+request IDs, conflicting canary reuse, receipt-free completion, invalid state
+transitions, and journal corruption. The deployed monitor reports the boundary
+in its private operator status while the public health response remains
+unchanged and privacy-minimized.
+
 The local decision journal defaults to `data/execution_decisions.jsonl`, which
 remains excluded from Git. See `docs/LUMEN_TRADING_EXECUTOR.md` for its contract
 and the requirements that still precede any live canary.
