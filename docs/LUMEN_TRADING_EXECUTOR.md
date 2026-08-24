@@ -88,7 +88,9 @@ shadow-only and halted.
 ## Coinbase CDP / AgentKit Backend
 
 `CdpAgentKitBackend` imports the pinned `coinbase-agentkit==0.7.4` and
-`cdp-sdk==1.48.0` packages only when instantiated. AgentKit provides the
+`cdp-sdk==1.48.0` packages only when instantiated. The live image also pins
+`eth-utils==6.0.0` so every contract, wallet, and Permit2 address is converted
+to its canonical EVM checksum at the AgentKit boundary. AgentKit provides the
 configured CDP EVM wallet provider;
 the adapter then uses its CDP client to create a quote with the approved
 slippage, execute it, and await a Base receipt. The generic natural-language

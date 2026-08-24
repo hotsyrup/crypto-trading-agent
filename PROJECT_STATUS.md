@@ -8,16 +8,16 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** CDP wallet, Railway credentials, and no-funds worker check verified
+**Overall:** funded CDP wallet and live path verified through a fail-closed canary
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
-- Live trading: **disabled by default**
-- Unattended live execution: **implemented but disabled pending a separately approved canary**
+- Live trading: **currently halted after the first fail-closed canary**
+- Unattended live execution: **implemented; corrected canary retry requires explicit approval**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
-- Default runtime treasury access: public/read-only; the disabled controlled-live adapter uses deployment-only CDP credentials
+- Runtime treasury: 25 USDC in the dedicated CDP wallet; signing credentials remain deployment-only
 
 ## What Works Today
 
@@ -76,6 +76,7 @@ the defaults.
 - [x] Add and verify the in-process emergency kill switch
 - [x] Verify Railway production configuration and masked CDP secret handling
 - [x] Verify the deployed worker reaches `no_funds_ready` for the exact Base wallet
+- [x] Verify the funded wallet balance and complete a fail-closed $1.25 backend canary
 - [ ] Run end-to-end paper tests under production-like conditions
 - [x] Unit-test live limits against strategy and backend bypass attempts
 - [x] Implement the verified CDP balance/portfolio reader and runnable worker
@@ -96,15 +97,18 @@ Railway has a healthy persistent volume mounted at `/app/data` and now stores
 variables; credentials remain outside GitHub. Coinbase created the dedicated
 `lumen-trading-agent` API-key wallet at
 `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`. The execution and research
-workers refresh their own exact-25 snapshots before using them. Deployment
-`af9bb3a0-e5e1-4d10-b56d-f45d0a0ef020` verified the exact treasury on
-`base-mainnet` with chain ID 8453 and reached `no_funds_ready`. Live activation
-still requires setting all three gates deliberately:
+workers refresh their own exact-25 snapshots before using them. Research
+deployment `f4a6d487-1a4e-437a-a247-4fee1789f6f7` stored all 25 governed packets.
+The trading worker verified 25 USDC in the exact treasury on `base-mainnet`,
+chain ID 8453. The first $1.25 canary was reserved, failed at the AgentKit
+address boundary, and was audit-recorded as `BACKEND_FAILED`; no confirmed
+swap receipt exists. Deployment `b3524e5a-8d26-46d0-8deb-4654bf8a2cb2`
+contains the tested checksum correction and is currently shadow-only with the
+kill switch halted. A retry requires setting all three gates deliberately:
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`.
 
-Do not deposit trading capital or arm the switch without separate approval for
-a small first canary and a final review of the live gates.
+Do not retry the real-money canary without explicit approval for that action.
 
 ## Wallet Roles
 
