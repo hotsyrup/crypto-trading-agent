@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-23_
+_Last updated: 2026-08-24_
 
 ## Mission
 
@@ -8,14 +8,14 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** CDP wallet and Railway credentials configured; no-funds activation check pending
+**Overall:** CDP wallet, Railway credentials, and no-funds worker check verified
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
 - Live trading: **disabled by default**
-- Unattended live execution: **implemented but disabled pending no-funds verification**
+- Unattended live execution: **implemented but disabled pending a separately approved canary**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
 - Default runtime treasury access: public/read-only; the disabled controlled-live adapter uses deployment-only CDP credentials
 
@@ -75,6 +75,7 @@ the defaults.
 - [x] Add stale market, risk, intent, and swap-quote protection
 - [x] Add and verify the in-process emergency kill switch
 - [x] Verify Railway production configuration and masked CDP secret handling
+- [x] Verify the deployed worker reaches `no_funds_ready` for the exact Base wallet
 - [ ] Run end-to-end paper tests under production-like conditions
 - [x] Unit-test live limits against strategy and backend bypass attempts
 - [x] Implement the verified CDP balance/portfolio reader and runnable worker
@@ -95,14 +96,15 @@ Railway has a healthy persistent volume mounted at `/app/data` and now stores
 variables; credentials remain outside GitHub. Coinbase created the dedicated
 `lumen-trading-agent` API-key wallet at
 `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`. The execution and research
-workers refresh their own exact-25 snapshots before using them. Before live
-activation, verify the deployed worker resolves that exact treasury on
-`base-mainnet`, then set all three activation gates deliberately:
+workers refresh their own exact-25 snapshots before using them. Deployment
+`af9bb3a0-e5e1-4d10-b56d-f45d0a0ef020` verified the exact treasury on
+`base-mainnet` with chain ID 8453 and reached `no_funds_ready`. Live activation
+still requires setting all three gates deliberately:
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`.
 
-Do not deposit trading capital or arm the switch until the deployed revision,
-volume persistence, wallet identity, and a no-funds startup check are verified.
+Do not deposit trading capital or arm the switch without separate approval for
+a small first canary and a final review of the live gates.
 
 ## Wallet Roles
 
@@ -126,10 +128,10 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Run the no-funds controlled-live input check without arming execution.**
+**Validate the top-25 research feed, then obtain approval for a small canary.**
 
-The immediate focus is a no-funds exact-wallet/network check, top-25
-research-feed verification, and one separately approved small canary.
+The no-funds exact-wallet/network check is complete. The immediate focus is
+top-25 research-feed verification and one separately approved small canary.
 
 ## Project Dashboard Roadmap
 

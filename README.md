@@ -194,11 +194,11 @@ persistent volume at `/app/data`. Production now has `CDP_API_KEY_ID`,
 for the pinned wallet above. Never paste those values into GitHub, logs,
 prompts, or committed files.
 
-Deploy first with the defaults (`LIVE_WORKER_ENABLED=false`,
-`LIVE_TRADING_ENABLED=false`,
-`TRADING_EXECUTOR_MODE=shadow_only`, kill switch halted). Verify the deployed
-commit, then enable only `LIVE_WORKER_ENABLED=true` for the no-funds wallet and
-network check. Only after that check should an operator set
+Production has completed the no-funds check with `LIVE_WORKER_ENABLED=true`,
+`LIVE_TRADING_ENABLED=false`, `TRADING_EXECUTOR_MODE=shadow_only`, and the kill
+switch halted. The deployed worker verified the pinned wallet on
+`base-mainnet`, chain ID 8453, and reached `no_funds_ready`. Only after separate
+approval for a small canary should an operator set
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`. Funding and a first canary remain separate
 human actions. Research packets are never accepted as wallet-balance evidence.
@@ -352,9 +352,9 @@ enabled. No API key or wallet funding is required.
 ## Project Status
 
 The live mandate, treasury identity, governed top-25 execution adapter, CDP
-balance reader, and runnable Railway worker are implemented, but execution
-remains disabled by default. The next milestone is the no-funds CDP/Railway
-identity check followed by one separately approved small canary. Restart and
+balance reader, and runnable Railway worker are implemented, and the no-funds
+CDP/Railway identity check is verified. Execution remains disabled by default.
+The next milestone is one separately approved small canary. Restart and
 ambiguous-timeout reservations remain fail-closed and require explicit
 reconciliation rather than automatic retry.
 
