@@ -10,7 +10,8 @@ COPY requirements.txt requirements-live.txt ./
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements-live.txt
+    && pip install --no-cache-dir -r requirements-live.txt \
+    && python -c "from coinbase_agentkit import CdpEvmWalletProvider"
 RUN useradd --create-home botuser
 
 COPY --chown=botuser:botuser app ./app
