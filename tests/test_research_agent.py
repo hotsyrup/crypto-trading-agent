@@ -3,7 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -20,6 +20,7 @@ from app.research_agent import (
     load_config,
     public_health_state,
     public_route_response,
+    run_research_cycle,
     select_primary_pair,
     store_packets,
 )
@@ -152,18 +153,53 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
 
     @patch("app.research_agent.get_json")
-    def test_fetch_pairs_uses_all_pools_endpoint_for_each_candidate(self, get_json) -> None:
-        get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
+    def test_fetch_pairs_batches_all_candidates_in_one_provider_request(self, get_json) -> None:
+        get_json.return_value = [sample_pair("100"), sample_pair("200")]
         second = "0x0000000000000000000000000000000000000002"
         pairs = fetch_pairs([ADDRESS, second])
         self.assertEqual(len(pairs), 2)
-        self.assertEqual(
-            [call.args[0] for call in get_json.call_args_list],
-            [
-                f"/token-pairs/v1/base/{ADDRESS}",
-                f"/token-pairs/v1/base/{second}",
-            ],
+        get_json.assert_called_once_with(f"/tokens/v1/base/{ADDRESS},{second}")
+
+    @patch("app.research_agent.store_packets")
+    @patch("app.research_agent.fetch_pairs")
+    @patch("app.research_agent.discover_base_contracts")
+    @patch("app.research_agent.load_config")
+    @patch("app.research_agent._utc_now")
+    def test_research_cycle_timestamps_packets_after_provider_fetch(
+        self,
+        utc_now,
+        load_config_mock,
+        discover_mock,
+        fetch_mock,
+        store_mock,
+    ) -> None:
+        started_at = datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc)
+        completed_at = started_at + timedelta(minutes=3)
+        utc_now.side_effect = [started_at, completed_at]
+        load_config_mock.return_value = (
+            300,
+            1,
+            Decimal("50000"),
+            5,
+            Path("unused.sqlite3"),
+            (ADDRESS,),
         )
+        discover_mock.return_value = [
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            }
+        ]
+        fetch_mock.return_value = [sample_pair()]
+        store_mock.return_value = 1
+
+        self.assertEqual(run_research_cycle(), 1)
+
+        packet = store_mock.call_args.args[1][0]
+        self.assertEqual(packet["received_at"], completed_at.isoformat())
 
     def test_paid_and_execution_flags_fail_closed(self) -> None:
         for flag in ("LIVE_TRADING_ENABLED", "BANKR_ENABLED", "AIXBT_ENABLED"):

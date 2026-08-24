@@ -157,13 +157,10 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
         raise ValueError("DEX Screener accepts at most 30 token addresses per batch.")
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
-    pairs: list[dict[str, object]] = []
-    for address in addresses:
-        payload = get_json(f"/token-pairs/v1/base/{address}")
-        if not isinstance(payload, list):
-            raise ValueError("DEX Screener token-pairs response must be a list.")
-        pairs.extend(pair for pair in payload if isinstance(pair, dict))
-    return pairs
+    payload = get_json(f"/tokens/v1/base/{','.join(addresses)}")
+    if not isinstance(payload, list):
+        raise ValueError("DEX Screener tokens response must be a list.")
+    return [pair for pair in payload if isinstance(pair, dict)]
 
 
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
@@ -469,10 +466,13 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
 
 def run_research_cycle() -> int:
     _, limit, minimum_liquidity, freshness, database_path, watchlist = load_config()
-    received_at = _utc_now()
+    cycle_started_at = _utc_now()
     profiles = discover_base_contracts(limit, watchlist)
     addresses = [str(profile["contract_address"]) for profile in profiles]
     pairs = fetch_pairs(addresses)
+    received_at = _utc_now()
+    if received_at < cycle_started_at:
+        raise ValueError("Research provider cycle completion precedes its start.")
     packets = []
     for profile in profiles:
         contract_address = str(profile["contract_address"])
