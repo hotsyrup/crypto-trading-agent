@@ -519,6 +519,22 @@ class ControlledLiveExecutionTests(unittest.TestCase):
         self.assertEqual(excessive_slippage.status, STATUS_RECEIPT_REJECTED)
         self.assertEqual(excessive_output.status, STATUS_RECEIPT_REJECTED)
 
+    def test_receipt_slippage_accepts_sub_micro_bps_decimal_noise(self) -> None:
+        result = self.execute(
+            backend=Backend(
+                receipt(min_to_amount=Decimal("19.8999999999994"))
+            )
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+
+    def test_receipt_slippage_rejects_meaningful_excess_over_limit(self) -> None:
+        result = self.execute(
+            backend=Backend(receipt(min_to_amount=Decimal("19.899998")))
+        )
+
+        self.assertEqual(result.status, STATUS_RECEIPT_REJECTED)
+
 
 class CdpAgentKitBackendTests(unittest.TestCase):
     def test_adapter_repairs_only_cdp_148_liquidity_enum_validator(self) -> None:
