@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.base_asset_universe import GovernedAssetUniverse
 from app.live_execution_journal import (
@@ -278,19 +278,19 @@ def _validate_receipt(
         if not all(value is not None for value in approval_values):
             reasons.append("ERC-20 approval evidence is incomplete.")
         else:
-            assert receipt.approval_transaction_hash is not None
-            assert receipt.approval_token is not None
-            assert receipt.approval_spender is not None
-            assert receipt.approval_amount is not None
+            approval_transaction_hash = cast(str, receipt.approval_transaction_hash)
+            approval_token = cast(str, receipt.approval_token)
+            approval_spender = cast(str, receipt.approval_spender)
+            approval_amount = cast(Decimal, receipt.approval_amount)
             if not TRANSACTION_HASH_PATTERN.fullmatch(
-                receipt.approval_transaction_hash
+                approval_transaction_hash
             ):
                 reasons.append("ERC-20 approval transaction hash is invalid.")
-            if receipt.approval_token.strip().lower() != request.from_token.strip().lower():
+            if approval_token.strip().lower() != request.from_token.strip().lower():
                 reasons.append("ERC-20 approval token does not match the swap input.")
-            if receipt.approval_spender.strip().lower() != PERMIT2_ADDRESS:
+            if approval_spender.strip().lower() != PERMIT2_ADDRESS:
                 reasons.append("ERC-20 approval spender is not Permit2.")
-            if receipt.approval_amount != request.from_amount:
+            if approval_amount != request.from_amount:
                 reasons.append("ERC-20 approval must equal the exact swap amount.")
     return tuple(reasons)
 

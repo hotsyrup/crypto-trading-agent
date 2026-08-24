@@ -363,7 +363,8 @@ def execute_research_portfolio_signal(
     )
 
     if sell_signal:
-        assert position is not None
+        if position is None:
+            return _policy_rejected("Verified sell position is unavailable.")
         if (
             not _finite_positive(position.value_usdc)
             or not _finite_positive(position.token_balance)
