@@ -21,6 +21,7 @@ from app.controlled_live_execution import (
     ApprovedSwap,
     CdpAgentKitBackend,
     SwapReceipt,
+    _prepare_cdp_swap_response_model,
     execute_controlled_live_trade,
 )
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
@@ -520,6 +521,36 @@ class ControlledLiveExecutionTests(unittest.TestCase):
 
 
 class CdpAgentKitBackendTests(unittest.TestCase):
+    def test_adapter_repairs_only_cdp_148_liquidity_enum_validator(self) -> None:
+        rebuilt: list[bool] = []
+        validators = {"liquidity_available_validate_enum": object()}
+
+        class Response:
+            __pydantic_decorators__ = types.SimpleNamespace(
+                field_validators=validators
+            )
+            model_fields = {"liquidity_available": object(), "to_amount": object()}
+
+            @classmethod
+            def model_rebuild(cls, *, force: bool) -> None:
+                rebuilt.append(force)
+
+        response_module = types.SimpleNamespace(CreateSwapQuoteResponse=Response)
+        with (
+            patch("importlib.metadata.version", return_value="1.48.0"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "cdp.openapi_client.models.create_swap_quote_response": response_module,
+                },
+            ),
+        ):
+            _prepare_cdp_swap_response_model()
+
+        self.assertNotIn("liquidity_available_validate_enum", validators)
+        self.assertIn("to_amount", Response.model_fields)
+        self.assertEqual(rebuilt, [True])
+
     def test_adapter_paginates_and_normalizes_exact_base_balances(self) -> None:
         calls: list[object] = []
 
@@ -678,7 +709,10 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             from_decimals=6,
             to_decimals=18,
         )
-        with patch.dict("sys.modules", agentkit_modules(module)):
+        with (
+            patch.dict("sys.modules", agentkit_modules(module)),
+            patch("app.controlled_live_execution._prepare_cdp_swap_response_model"),
+        ):
             result = CdpAgentKitBackend().submit_swap(order)
 
         approval = calls["approval"]
@@ -756,7 +790,10 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             CdpEvmWalletProvider=Wallet,
             CdpEvmWalletProviderConfig=Config,
         )
-        with patch.dict("sys.modules", agentkit_modules(module)):
+        with (
+            patch.dict("sys.modules", agentkit_modules(module)),
+            patch("app.controlled_live_execution._prepare_cdp_swap_response_model"),
+        ):
             result = CdpAgentKitBackend().submit_swap(swap())
 
         self.assertTrue(result.success)
@@ -828,7 +865,10 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             CdpEvmWalletProvider=Wallet,
             CdpEvmWalletProviderConfig=Config,
         )
-        with patch.dict("sys.modules", agentkit_modules(module)):
+        with (
+            patch.dict("sys.modules", agentkit_modules(module)),
+            patch("app.controlled_live_execution._prepare_cdp_swap_response_model"),
+        ):
             backend = CdpAgentKitBackend()
             with self.assertRaisesRegex(RuntimeError, "notional boundary"):
                 backend.submit_swap(swap())

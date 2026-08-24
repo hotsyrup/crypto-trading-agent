@@ -121,6 +121,36 @@ def _checksum_address(address: str) -> str:
         raise ValueError("CDP backend received an invalid EVM address.") from error
 
 
+def _prepare_cdp_swap_response_model() -> None:
+    """Repair CDP SDK 1.48.0's impossible boolean liquidity validator.
+
+    The generated model declares ``liquidityAvailable`` as ``StrictBool`` but
+    also requires the string literal ``"true"``. Coinbase's API correctly
+    returns a JSON boolean, so no response can pass both constraints. Remove
+    only that generated enum validator while retaining Pydantic validation for
+    the boolean field and every other quote field.
+    """
+
+    from importlib.metadata import version
+
+    if version("cdp-sdk") != "1.48.0":
+        return
+    from cdp.openapi_client.models.create_swap_quote_response import (
+        CreateSwapQuoteResponse,
+    )
+
+    decorators = getattr(CreateSwapQuoteResponse, "__pydantic_decorators__", None)
+    validators = getattr(decorators, "field_validators", None)
+    fields = getattr(CreateSwapQuoteResponse, "model_fields", {})
+    validator_name = "liquidity_available_validate_enum"
+    if not isinstance(validators, dict) or "liquidity_available" not in fields:
+        raise RuntimeError("CDP swap response model is incompatible with the reviewed fix.")
+    if validator_name not in validators:
+        return
+    validators.pop(validator_name)
+    CreateSwapQuoteResponse.model_rebuild(force=True)
+
+
 def _validate_swap(
     swap: ApprovedSwap,
     intent: TradeIntent,
@@ -504,6 +534,7 @@ class CdpAgentKitBackend:
         checksum_to_token = _checksum_address(request.to_token)
         checksum_wallet = _checksum_address(self._wallet.get_address())
         checksum_permit2 = _checksum_address(PERMIT2_ADDRESS)
+        _prepare_cdp_swap_response_model()
 
         if request.from_token.lower() != NATIVE_ETH_ADDRESS:
             allowance_abi = [
