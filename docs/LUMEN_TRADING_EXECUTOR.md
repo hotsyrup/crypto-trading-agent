@@ -118,12 +118,12 @@ event is ambiguous and remains charged to the daily ceiling.
    `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`.
 2. `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` are stored
    only as masked Railway service variables.
-3. Railway deployed them with `LIVE_WORKER_ENABLED=false`, live disabled, and
-   the kill switch halted.
+3. Railway deployed them with `LIVE_WORKER_ENABLED=true`, live disabled,
+   shadow-only mode, and the kill switch halted.
 4. The existing persistent `/app/data` storage remains mounted across redeploys.
-5. Next, set only `LIVE_WORKER_ENABLED=true` and verify the deployed commit,
-   `base-mainnet`, chain ID 8453, and exact wallet
-   identity with no funds present.
+5. Deployment `af9bb3a0-e5e1-4d10-b56d-f45d0a0ef020` verified
+   `base-mainnet`, chain ID 8453, the exact wallet identity, and the
+   `no_funds_ready` worker state.
 6. Configure the research service for 25 candidates and automatic governed
    universe refresh; verify its public feed contains fresh exact-contract packets.
 7. Exercise restart, timeout, ambiguous receipt, approval, and emergency-stop
