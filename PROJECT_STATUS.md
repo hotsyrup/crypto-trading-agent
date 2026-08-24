@@ -8,14 +8,14 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** Governed top-25 controlled-live capability implemented; activation still pending
+**Overall:** CDP wallet and Railway credentials configured; no-funds activation check pending
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
 - Live trading: **disabled by default**
-- Unattended live execution: **implemented but disabled pending CDP/Railway setup**
+- Unattended live execution: **implemented but disabled pending no-funds verification**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
 - Default runtime treasury access: public/read-only; the disabled controlled-live adapter uses deployment-only CDP credentials
 
@@ -74,7 +74,7 @@ the defaults.
 - [x] Create durable audit records for every controlled-live decision and execution attempt
 - [x] Add stale market, risk, intent, and swap-quote protection
 - [x] Add and verify the in-process emergency kill switch
-- [ ] Verify Railway production configuration and secret handling
+- [x] Verify Railway production configuration and masked CDP secret handling
 - [ ] Run end-to-end paper tests under production-like conditions
 - [x] Unit-test live limits against strategy and backend bypass attempts
 - [x] Implement the verified CDP balance/portfolio reader and runnable worker
@@ -90,11 +90,13 @@ GitHub is the source of truth for code, documentation, tests, and deployment con
 
 ### Railway
 
-Railway has a healthy persistent volume mounted at `/app/data`. It must receive
-`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` through service
-variables; credentials must never be committed to GitHub. The execution and
-research workers refresh their own exact-25 snapshots before using them. Before activation,
-verify that those credentials resolve the exact adopted treasury on
+Railway has a healthy persistent volume mounted at `/app/data` and now stores
+`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` as masked service
+variables; credentials remain outside GitHub. Coinbase created the dedicated
+`lumen-trading-agent` API-key wallet at
+`0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`. The execution and research
+workers refresh their own exact-25 snapshots before using them. Before live
+activation, verify the deployed worker resolves that exact treasury on
 `base-mainnet`, then set all three activation gates deliberately:
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`.
@@ -124,10 +126,10 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Connect and verify the controlled-live inputs without funding or arming it.**
+**Run the no-funds controlled-live input check without arming execution.**
 
-The immediate focus is CDP secret setup, a no-funds exact-wallet/network check,
-top-25 research-feed verification, and one separately approved small canary.
+The immediate focus is a no-funds exact-wallet/network check, top-25
+research-feed verification, and one separately approved small canary.
 
 ## Project Dashboard Roadmap
 
