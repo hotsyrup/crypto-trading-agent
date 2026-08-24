@@ -421,8 +421,8 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     limit = int(os.getenv("RESEARCH_MAX_CANDIDATES", "10"))
     freshness = int(os.getenv("RESEARCH_FRESHNESS_MINUTES", "90"))
     minimum_liquidity = Decimal(os.getenv("RESEARCH_MIN_LIQUIDITY_USD", "50000"))
-    if not 300 <= interval <= 86400:
-        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 300 and 86400.")
+    if not 60 <= interval <= 86400:
+        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 60 and 86400.")
     if not 1 <= limit <= MAX_API_CANDIDATES:
         raise ValueError("RESEARCH_MAX_CANDIDATES must be between 1 and 30.")
     if not 5 <= freshness <= 1440:

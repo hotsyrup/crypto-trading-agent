@@ -84,6 +84,23 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(path, Path("data/research_packets.sqlite3"))
         self.assertEqual(len(watchlist), 2)
 
+    def test_research_interval_supports_continuous_live_freshness(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RESEARCH_INTERVAL_SECONDS": "60"},
+            clear=True,
+        ):
+            interval, *_ = load_config()
+        self.assertEqual(interval, 60)
+
+        with patch.dict(
+            os.environ,
+            {"RESEARCH_INTERVAL_SECONDS": "59"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "between 60 and 86400"):
+                load_config()
+
     def test_governed_universe_becomes_exact_research_watchlist(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
