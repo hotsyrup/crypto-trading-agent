@@ -599,7 +599,16 @@ def main() -> None:
         try:
             run_research_cycle()
         except Exception as error:  # keep health endpoint available for diagnosis
-            STATE.update(status="failed", last_error=type(error).__name__)
+            error_code = getattr(error, "code", None)
+            error_name = type(error).__name__
+            STATE.update(
+                status="failed",
+                last_error=(
+                    f"{error_name}:{error_code}"
+                    if error_code is not None
+                    else error_name
+                ),
+            )
             print(json.dumps(STATE), flush=True)
         time.sleep(interval)
 
