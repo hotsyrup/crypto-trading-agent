@@ -224,6 +224,20 @@ def _ordered_signals(
     return tuple(sorted(signals, key=priority))
 
 
+def _execution_eligible_signals(
+    signals: tuple[ResearchSignal, ...],
+    universe: GovernedAssetUniverse,
+) -> tuple[ResearchSignal, ...]:
+    """Remove candidates that the downstream asset-liquidity policy must reject."""
+
+    accepted = []
+    for signal in signals:
+        asset = universe.require(signal.symbol, signal.token_address)
+        if signal.liquidity_usd >= asset.liquidity_usd / Decimal("2"):
+            accepted.append(signal)
+    return tuple(accepted)
+
+
 def run_live_cycle(
     *,
     runtime: LiveRuntime,
@@ -287,15 +301,16 @@ def run_live_cycle(
         path=risk_journal_path,
         now=current_time,
     )
-    if not signals:
+    execution_signals = _execution_eligible_signals(signals, resolved_universe)
+    if not execution_signals:
         return LiveCycleResult(
             CYCLE_NO_SIGNAL,
             wallet,
             runtime.network_id,
             portfolio.total_value_usdc,
-            "No fresh governed research signal is available.",
+            "No fresh governed research signal passes execution liquidity policy.",
         )
-    selected = _ordered_signals(signals, portfolio, resolved_universe)[0]
+    selected = _ordered_signals(execution_signals, portfolio, resolved_universe)[0]
     result: ControlledLiveResult = execute_research_portfolio_signal(
         selected,
         portfolio,
