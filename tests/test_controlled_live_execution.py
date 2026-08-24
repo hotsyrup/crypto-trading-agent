@@ -528,6 +528,18 @@ class ControlledLiveExecutionTests(unittest.TestCase):
 
         self.assertEqual(result.status, STATUS_CONFIRMED)
 
+    def test_receipt_slippage_accepts_low_notional_decimal_noise(self) -> None:
+        result = self.execute(
+            backend=Backend(
+                receipt(
+                    to_amount=Decimal("0.000029192052679948"),
+                    min_to_amount=Decimal("0.00002904609240665"),
+                )
+            )
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+
     def test_receipt_slippage_rejects_meaningful_excess_over_limit(self) -> None:
         result = self.execute(
             backend=Backend(receipt(min_to_amount=Decimal("19.899998")))
