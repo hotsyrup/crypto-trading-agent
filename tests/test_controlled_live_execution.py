@@ -502,6 +502,91 @@ class ControlledLiveExecutionTests(unittest.TestCase):
 
 
 class CdpAgentKitBackendTests(unittest.TestCase):
+    def test_adapter_paginates_and_normalizes_exact_base_balances(self) -> None:
+        calls: list[object] = []
+
+        class Config:
+            def __init__(self, **values: object):
+                pass
+
+        class Account:
+            async def list_token_balances(self, **values: object):
+                calls.append(values.get("page_token"))
+                if values.get("page_token") is None:
+                    return types.SimpleNamespace(
+                        balances=[
+                            types.SimpleNamespace(
+                                token=types.SimpleNamespace(
+                                    contract_address=BASE_USDC_ADDRESS.upper()
+                                ),
+                                amount=types.SimpleNamespace(
+                                    amount=25000000,
+                                    decimals=6,
+                                ),
+                            )
+                        ],
+                        next_page_token="page-2",
+                    )
+                return types.SimpleNamespace(
+                    balances=[
+                        types.SimpleNamespace(
+                            token=types.SimpleNamespace(
+                                contract_address=NATIVE_ETH_ADDRESS
+                            ),
+                            amount=types.SimpleNamespace(
+                                amount=10**16,
+                                decimals=18,
+                            ),
+                        )
+                    ],
+                    next_page_token=None,
+                )
+
+        class Evm:
+            async def get_account(self, **values: object):
+                return Account()
+
+        class Client:
+            evm = Evm()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args: object):
+                return None
+
+        class Wallet:
+            def __init__(self, config: Config):
+                pass
+
+            def get_address(self) -> str:
+                return AUTHORIZED_TREASURY_ADDRESS
+
+            def get_network(self):
+                return types.SimpleNamespace(
+                    chain_id=BASE_MAINNET_CHAIN_ID,
+                    network_id=CDP_NETWORK_ID,
+                )
+
+            def get_client(self) -> Client:
+                return Client()
+
+        module = types.SimpleNamespace(
+            CdpEvmWalletProvider=Wallet,
+            CdpEvmWalletProviderConfig=Config,
+        )
+        with patch.dict("sys.modules", {"coinbase_agentkit": module}):
+            balances = CdpAgentKitBackend().list_token_balances()
+
+        self.assertEqual(calls, [None, "page-2"])
+        self.assertEqual(
+            balances,
+            (
+                (BASE_USDC_ADDRESS, Decimal("25"), 6),
+                (NATIVE_ETH_ADDRESS, Decimal("0.01"), 18),
+            ),
+        )
+
     def test_adapter_replaces_oversized_allowance_with_exact_permit2_amount(self) -> None:
         calls: dict[str, object] = {}
 

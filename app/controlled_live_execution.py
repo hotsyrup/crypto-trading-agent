@@ -452,6 +452,14 @@ class CdpAgentKitBackend:
         if network.chain_id != BASE_MAINNET_CHAIN_ID or network.network_id != CDP_NETWORK_ID:
             raise RuntimeError("CDP wallet provider returned the wrong network.")
 
+    @property
+    def wallet_address(self) -> str:
+        return self._wallet.get_address()
+
+    @property
+    def network_id(self) -> str:
+        return self._wallet.get_network().network_id
+
     @staticmethod
     def _run(coroutine):
         try:
@@ -607,3 +615,32 @@ class CdpAgentKitBackend:
             ),
             error=None if success else "CDP swap transaction reverted.",
         )
+
+    def list_token_balances(self) -> tuple[tuple[str, Decimal, int], ...]:
+        """Return normalized Base balances from the same verified CDP account."""
+
+        async def load_balances() -> tuple[tuple[str, Decimal, int], ...]:
+            client = self._wallet.get_client()
+            collected: list[tuple[str, Decimal, int]] = []
+            page_token = None
+            async with client as cdp:
+                account = await cdp.evm.get_account(address=self.wallet_address)
+                while True:
+                    result = await account.list_token_balances(
+                        network=CDP_SWAP_NETWORK,
+                        page_size=100,
+                        page_token=page_token,
+                    )
+                    for balance in result.balances:
+                        decimals = int(balance.amount.decimals)
+                        atomic = int(balance.amount.amount)
+                        amount = Decimal(atomic) / Decimal(10**decimals)
+                        collected.append(
+                            (str(balance.token.contract_address).lower(), amount, decimals)
+                        )
+                    page_token = result.next_page_token
+                    if not page_token:
+                        break
+            return tuple(collected)
+
+        return self._run(load_balances())

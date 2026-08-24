@@ -79,10 +79,11 @@ TRADING_EXECUTOR_MODE=controlled_live
 TRADING_EXECUTOR_KILL_SWITCH=armed
 ```
 
-Changing these variables does not itself produce an intent, fund a wallet, or
-start a trade. The existing Railway shadow monitor also continues to refuse
-live flags; a controlled-live worker must call the explicit composed entry
-point with a fresh `RiskSnapshot` and `ApprovedSwap`.
+Changing these variables does not itself produce an intent or fund a wallet.
+`app.live_portfolio_worker` is the production entry point and remains inert by
+default. With only `LIVE_WORKER_ENABLED=true`, it can verify the exact wallet,
+network, balances, universe, and risk inputs while the executor remains
+shadow-only and halted.
 
 ## Coinbase CDP / AgentKit Backend
 
@@ -116,19 +117,16 @@ event is ambiguous and remains charged to the daily ceiling.
    adopted trading treasury; do not let the runtime create an unreviewed wallet.
 2. Add `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` only as
    Railway service variables.
-3. Deploy with live disabled and the kill switch halted.
-4. Mount and verify persistent `/app/data` storage across a redeploy.
-5. Verify the deployed commit, `base-mainnet`, chain ID 8453, and exact wallet
+3. Deploy with `LIVE_WORKER_ENABLED=false`, live disabled, and the kill switch halted.
+4. Verify the existing persistent `/app/data` storage across the redeploy.
+5. Set only `LIVE_WORKER_ENABLED=true` and verify the deployed commit,
+   `base-mainnet`, chain ID 8453, and exact wallet
    identity with no funds present.
-6. Schedule `python -m app.base_asset_universe_refresh` and configure both
-   `LIVE_ASSET_UNIVERSE_PATH` and `RESEARCH_ASSET_UNIVERSE_PATH` to the same
-   persistent snapshot.
-7. Bind a verified CDP balance reader to `VerifiedPortfolio`; do not derive
-   balances or cost basis from research packets.
-8. Feed each verified mark through the persistent live portfolio-risk ledger.
-9. Exercise restart, timeout, ambiguous receipt, approval, and external emergency-stop
+6. Configure the research service for 25 candidates and automatic governed
+   universe refresh; verify its public feed contains fresh exact-contract packets.
+7. Exercise restart, timeout, ambiguous receipt, approval, and emergency-stop
    recovery in a production-like environment.
-10. Obtain separate approval before arming, depositing funds, or sending a first
+8. Obtain separate approval before arming, depositing funds, or sending a first
    small canary.
 
 Secrets, owner private keys, seed phrases, wallet exports, and approval links
