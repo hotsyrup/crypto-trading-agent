@@ -42,6 +42,7 @@ DEFAULT_SLIPPAGE_BPS = 50
 STRATEGY_ID = "research-ranked-base-portfolio"
 STRATEGY_VERSION = "1.0.0"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
+USDC_QUANTUM = Decimal("0.000001")
 ALLOWED_RESEARCH_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
@@ -369,7 +370,10 @@ def execute_research_portfolio_signal(
         ):
             return _policy_rejected("Verified sell position is invalid.")
         side = "SELL"
-        notional = min(MAX_TRADE_NOTIONAL_USDC, position.value_usdc)
+        notional = min(MAX_TRADE_NOTIONAL_USDC, position.value_usdc).quantize(
+            USDC_QUANTUM,
+            rounding=ROUND_DOWN,
+        )
         ratio = notional / position.value_usdc
         quantum = Decimal(1).scaleb(-asset.decimals)
         from_amount = (position.token_balance * ratio).quantize(
@@ -391,7 +395,7 @@ def execute_research_portfolio_signal(
             portfolio.usdc_balance,
             room,
             new_strategy_limit,
-        )
+        ).quantize(USDC_QUANTUM, rounding=ROUND_DOWN)
         if not _finite_positive(notional):
             return _policy_rejected("No portfolio capacity remains for this buy.")
         side = "BUY"
