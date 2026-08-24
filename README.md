@@ -117,7 +117,7 @@ authority, but execution must remain fail-closed until the live order path,
 high-water-mark accounting, daily-loss accounting, audit journal, stale-data
 checks, and emergency kill switch are implemented and verified.
 
-## Lumen Trading Executor — Stage 1
+## Lumen Trading Executor — Controlled Live
 
 `app.trading_executor` is the first deterministic execution-policy layer. It
 accepts a structured trade intent and current risk snapshot, then verifies:
@@ -137,16 +137,48 @@ journal with sequence numbers and a SHA-256 hash chain. Reusing an intent ID is
 blocked after restart, changing the content behind an existing ID fails closed,
 and corruption or journal unavailability prevents progress.
 
-This stage is deliberately `shadow_only`. It refuses
-`LIVE_TRADING_ENABLED=true`, defaults its independent kill switch to `halted`,
-always returns `ready_for_submission=false`, and contains no signer, wallet,
-allowance, swap, RPC write, transaction construction, or broadcast method. A
-`SHADOW_APPROVED` decision is evidence that policy checks passed—not permission
-or ability to trade.
+`shadow_only` remains the default and never submits a transaction. The optional
+`controlled_live` mode sits below the same deterministic policy and requires
+all three independent gates: `LIVE_TRADING_ENABLED=true`,
+`TRADING_EXECUTOR_MODE=controlled_live`, and
+`TRADING_EXECUTOR_KILL_SWITCH=armed`.
 
-The local decision journal defaults to `data/execution_decisions.jsonl`, which
-remains excluded from Git. See `docs/LUMEN_TRADING_EXECUTOR.md` for its contract
-and the requirements that still precede any live canary.
+The first production route is deliberately one-way: native Base ETH to the
+official Base USDC contract through a Coinbase CDP wallet provided by AgentKit.
+It is risk-reducing only and cannot create an ERC-20 approval. Absolute limits
+are hard-coded at $20 per intent, $100 of reservations per UTC day, $500 total
+trading capital, and 100 bps maximum slippage. A fresh, exact quote is bound to
+the approved wallet, Base chain ID 8453, token pair, input amount, notional, and
+slippage before any backend call.
+
+The live audit reserves daily capacity under a file lock before submission.
+Reservations survive backend failures and ambiguous timeouts so retries cannot
+bypass the daily cap. Confirmed receipts, provider failures, and rejected
+receipts are appended to a separate SHA-256 hash chain. Wrong wallet/network,
+changed route fields, unexpected approvals, invalid outputs, and backend
+failures all fail closed.
+
+The decision journal defaults to `data/execution_decisions.jsonl`; the live
+reservation and receipt audit defaults to `data/live_execution_audit.jsonl`.
+Both remain excluded from Git and require persistent Railway storage. See
+`docs/LUMEN_TRADING_EXECUTOR.md` for the contract and remaining activation
+steps.
+
+### Railway and CDP activation (remaining operator work)
+
+The main Docker image installs the pinned `coinbase-agentkit` production
+adapter. In Railway, mount a persistent volume at `/app/data`, then add
+`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` as service
+variables. Never paste those values into GitHub, logs, prompts, or committed
+files.
+
+Deploy first with the defaults (`LIVE_TRADING_ENABLED=false`,
+`TRADING_EXECUTOR_MODE=shadow_only`, kill switch halted). Verify the deployed
+commit, durable journal writes, Base mainnet chain ID, and exact treasury
+address. Only after a separate no-funds review should an operator set
+`LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
+`TRADING_EXECUTOR_KILL_SWITCH=armed`. Funding and a first canary remain separate
+human actions; this pull request does not deploy, arm, fund, or trade.
 
 ### Run the Paper Bot
 
@@ -296,14 +328,12 @@ enabled. No API key or wallet funding is required.
 
 ## Project Status
 
-The live mandate and treasury identity are recorded, but execution remains
-disabled. The current runtime can research, paper trade, read the public
-treasury balance, and deterministically evaluate and journal structured trade
-intents in shadow mode. It cannot construct, sign, approve, or submit live
-orders. The next milestone is connecting a verified live portfolio reader to
-this policy layer and independently testing an emergency stop and a bounded,
-permissioned signing adapter without weakening replay, audit, freshness, or
-risk controls. Any live canary remains a separate activation gate.
+The live mandate, treasury identity, and minimal CDP execution adapter are
+implemented, but execution remains disabled by default. The only controlled
+route is a bounded native Base ETH-to-USDC risk-reducing swap. The next
+milestone is Railway/CDP configuration plus a verified live portfolio reader,
+restart/timeout reconciliation, and an independently exercised emergency stop.
+Any funding or live canary remains a separate activation gate.
 
 ## Disclaimer
 

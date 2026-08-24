@@ -1,0 +1,3 @@
+-r requirements.txt
+coinbase-agentkit==0.7.4
+cdp-sdk==1.48.0

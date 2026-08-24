@@ -22,16 +22,20 @@ AUTHORIZED_TREASURY_ADDRESS = (
     "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c"
 )
 EXECUTOR_MODE_SHADOW_ONLY = "shadow_only"
+EXECUTOR_MODE_CONTROLLED_LIVE = "controlled_live"
 KILL_SWITCH_ARMED = "armed"
 KILL_SWITCH_HALTED = "halted"
 STATUS_REJECTED = "REJECTED"
 STATUS_SHADOW_APPROVED = "SHADOW_APPROVED"
+STATUS_CONTROLLED_LIVE_APPROVED = "CONTROLLED_LIVE_APPROVED"
 STATUS_DUPLICATE_BLOCKED = "DUPLICATE_BLOCKED"
 STATUS_JOURNAL_FAILURE = "JOURNAL_FAILURE"
 DEFAULT_MAX_DATA_AGE_SECONDS = 120
 DEFAULT_MAX_FUTURE_SKEW_SECONDS = 30
 MIN_DATA_AGE_SECONDS = 10
 MAX_DATA_AGE_SECONDS = 3600
+MAX_TRADE_NOTIONAL_USDC = Decimal("20")
+MAX_TRADING_CAPITAL_USDC = Decimal("500")
 ADDRESS_PATTERN = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
@@ -74,6 +78,7 @@ class RiskSnapshot:
     observed_at: datetime
     complete: bool = True
     contradictory: bool = False
+    trading_capital_usdc: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -117,9 +122,12 @@ def _bounded_seconds(name: str, default: int) -> int:
 def load_executor_config() -> ExecutorConfig:
     mode = os.getenv("TRADING_EXECUTOR_MODE", EXECUTOR_MODE_SHADOW_ONLY)
     mode = mode.strip().lower()
-    if mode != EXECUTOR_MODE_SHADOW_ONLY:
+    if mode not in {
+        EXECUTOR_MODE_SHADOW_ONLY,
+        EXECUTOR_MODE_CONTROLLED_LIVE,
+    }:
         raise ValueError(
-            "TRADING_EXECUTOR_MODE supports shadow_only in this build."
+            "TRADING_EXECUTOR_MODE must be shadow_only or controlled_live."
         )
 
     kill_switch_state = os.getenv(
@@ -207,9 +215,8 @@ def evaluate_trade_intent(
 ) -> ExecutionDecision:
     """Evaluate a proposed Base ETH/USDC spot trade without executing it.
 
-    This first executor layer is deliberately shadow-only. A passing decision
-    means the intent matched the current deterministic policy; it is never a
-    transaction, signature, approval, or permission to submit one.
+    Shadow decisions remain non-executable. Controlled-live decisions can only
+    become executable through the separately journaled CDP submission layer.
     """
 
     fingerprint = intent_fingerprint(intent)
@@ -246,12 +253,10 @@ def evaluate_trade_intent(
             if age_reason:
                 reasons.append(age_reason)
 
-    if live.enabled:
-        reasons.append(
-            "This shadow-only build refuses LIVE_TRADING_ENABLED=true."
-        )
-    if executor.mode != EXECUTOR_MODE_SHADOW_ONLY:
-        reasons.append("Only shadow-only executor mode is implemented.")
+    if executor.mode == EXECUTOR_MODE_SHADOW_ONLY and live.enabled:
+        reasons.append("shadow_only requires LIVE_TRADING_ENABLED=false.")
+    if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE and not live.enabled:
+        reasons.append("controlled_live requires LIVE_TRADING_ENABLED=true.")
     if executor.kill_switch_state != KILL_SWITCH_ARMED:
         reasons.append("Trading executor kill switch is halted.")
 
@@ -320,10 +325,25 @@ def evaluate_trade_intent(
     if intent.notional_usdc.is_finite() and intent.notional_usdc <= 0:
         reasons.append("Notional must be greater than zero.")
     if (
+        intent.notional_usdc.is_finite()
+        and intent.notional_usdc > MAX_TRADE_NOTIONAL_USDC
+    ):
+        reasons.append("Notional exceeds the absolute $20 per-trade limit.")
+    if (
         intent.treasury_value_usdc.is_finite()
         and intent.treasury_value_usdc <= 0
     ):
         reasons.append("Treasury value must be greater than zero.")
+    if (
+        intent.treasury_value_usdc.is_finite()
+        and intent.treasury_value_usdc > MAX_TRADING_CAPITAL_USDC
+    ):
+        reasons.append("Treasury value exceeds the $500 trading-capital ceiling.")
+
+    if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE and side != "SELL":
+        reasons.append(
+            "The only controlled-live route is native Base ETH to official Base USDC."
+        )
 
     daily_reason = _validated_percent(risk.daily_loss_percent, "Daily loss")
     drawdown_reason = _validated_percent(risk.drawdown_percent, "Drawdown")
@@ -335,6 +355,23 @@ def evaluate_trade_intent(
         reasons.append("Risk snapshot is incomplete.")
     if risk.contradictory:
         reasons.append("Risk snapshot is contradictory.")
+    if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE:
+        if risk.trading_capital_usdc is None:
+            reasons.append(
+                "Controlled-live risk snapshot requires verified trading capital."
+            )
+        elif (
+            not risk.trading_capital_usdc.is_finite()
+            or risk.trading_capital_usdc <= 0
+            or risk.trading_capital_usdc > MAX_TRADING_CAPITAL_USDC
+        ):
+            reasons.append(
+                "Verified trading capital must be positive and at most $500."
+            )
+        elif risk.trading_capital_usdc != intent.treasury_value_usdc:
+            reasons.append(
+                "Trade intent treasury value does not match verified trading capital."
+            )
 
     if not reasons:
         position_limit = (
@@ -363,13 +400,29 @@ def evaluate_trade_intent(
         elif side == "SELL" and intent.notional_usdc > intent.current_position_usdc:
             reasons.append("Sell notional exceeds the current position value.")
 
+    approved_status = (
+        STATUS_CONTROLLED_LIVE_APPROVED
+        if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+        else STATUS_SHADOW_APPROVED
+    )
     return ExecutionDecision(
-        status=STATUS_REJECTED if reasons else STATUS_SHADOW_APPROVED,
+        status=STATUS_REJECTED if reasons else approved_status,
         reasons=tuple(reasons) if reasons else (
-            "Intent passed the shadow-only deterministic policy.",
+            "Intent passed the controlled-live deterministic policy."
+            if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+            else "Intent passed the shadow-only deterministic policy.",
         ),
         intent_id=intent.intent_id,
         intent_fingerprint=fingerprint,
+        mode=executor.mode,
+        executable=(
+            not reasons and executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+        ),
+        signing_authority=(
+            "cdp_agentkit"
+            if not reasons and executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+            else "none"
+        ),
     )
 
 

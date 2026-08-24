@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-13_
+_Last updated: 2026-08-23_
 
 ## Mission
 
@@ -8,16 +8,16 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** Paper-trading / pre-live hardening
+**Overall:** Controlled-live execution implemented; activation still pending
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: USDC and ETH
 - Live trading: **disabled by default**
-- Unattended live execution: **not yet enabled**
+- Unattended live execution: **implemented but disabled pending CDP/Railway setup**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
-- Treasury access from the current bot: public/read-only; no private signing credentials should be committed
+- Default runtime treasury access: public/read-only; the disabled controlled-live adapter uses deployment-only CDP credentials
 
 ## What Works Today
 
@@ -30,6 +30,9 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 - Run automated tests
 - Run the optional seven-day trending-token paper trial
 - Use project-scoped Base MCP configuration for interactive Base Account operations that require explicit human approval
+- Evaluate and reserve a bounded controlled-live native ETH-to-USDC swap
+- Submit that single route through a Coinbase CDP wallet supplied by AgentKit
+- Record hash-chained reservations, backend failures, rejected receipts, and confirmed transaction receipts
 
 ## Live Trading Guardrails Adopted
 
@@ -47,19 +50,25 @@ The repository records the following bounded mandate:
 - No unknown contracts
 - No unlimited approvals
 
-These limits do **not** mean live execution is ready. `LIVE_TRADING_ENABLED` remains fail-closed by default.
+The controlled-live layer also hard-codes absolute ceilings of $20 per trade,
+$100 reserved per UTC day, and $500 of trading capital. These limits cannot be
+raised with environment variables. `LIVE_TRADING_ENABLED=false`,
+`TRADING_EXECUTOR_MODE=shadow_only`, and a halted executor kill switch remain
+the defaults.
 
 ## Required Before Unattended Live Trading
 
-- [ ] Implement and verify the live order execution path
+- [x] Implement and unit-test the minimal CDP controlled-live order path
 - [ ] Implement high-water-mark accounting
 - [ ] Implement daily-loss accounting
-- [ ] Create durable audit records for every decision and execution
-- [ ] Add stale-market-data protection
-- [ ] Add and verify an emergency kill switch
+- [x] Create durable audit records for every controlled-live decision and execution attempt
+- [x] Add stale market, risk, intent, and swap-quote protection
+- [x] Add and verify the in-process emergency kill switch
 - [ ] Verify Railway production configuration and secret handling
 - [ ] Run end-to-end paper tests under production-like conditions
-- [ ] Verify live limits cannot be bypassed by strategy code
+- [x] Unit-test live limits against strategy and backend bypass attempts
+- [ ] Reconcile live wallet balances and confirmed receipts after restart/provider timeouts
+- [ ] Independently verify the kill switch outside the executor process
 - [ ] Complete a small-capital controlled live validation before scaling
 
 ## Deployment
@@ -70,7 +79,17 @@ GitHub is the source of truth for code, documentation, tests, and deployment con
 
 ### Railway
 
-The intended next deployment milestone is an always-on Railway Hobby deployment. Railway should receive secrets through its environment/secret configuration; credentials must never be committed to GitHub.
+The next deployment milestone is an always-on Railway deployment with a
+persistent volume mounted at `/app/data`. Railway must receive
+`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` through service
+variables; credentials must never be committed to GitHub. Before activation,
+verify that those credentials resolve the exact adopted treasury on
+`base-mainnet`, then set all three activation gates deliberately:
+`LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
+`TRADING_EXECUTOR_KILL_SWITCH=armed`.
+
+Do not deposit trading capital or arm the switch until the deployed revision,
+volume persistence, wallet identity, and a no-funds startup check are verified.
 
 ## Wallet Roles
 
@@ -94,9 +113,11 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Make the bot production-observable and fail-safe before enabling unattended live execution.**
+**Deploy and verify the controlled-live boundary without funding or arming it.**
 
-The immediate engineering focus is the Railway deployment plus enforceable accounting, risk controls, audit logging, stale-data protection, and a kill switch.
+The immediate engineering focus is Railway/CDP secret setup, persistent audit
+storage, verified live portfolio/P&L inputs, restart reconciliation, and an
+independent kill switch before a separately approved small canary.
 
 ## Project Dashboard Roadmap
 
