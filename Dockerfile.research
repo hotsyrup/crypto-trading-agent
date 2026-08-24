@@ -2,16 +2,23 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV APP_RUNTIME_USER=researchuser
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt
 RUN useradd --create-home researchuser
 
 COPY --chown=researchuser:researchuser app ./app
-RUN mkdir /app/data && chown researchuser:researchuser /app/data
+COPY --chown=root:root docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-USER researchuser
+RUN mkdir /app/data \
+    && chown researchuser:researchuser /app/data \
+    && chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "app.research_agent"]
