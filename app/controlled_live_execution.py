@@ -31,6 +31,10 @@ from app.trading_executor import (
 )
 
 
+# CDP's account lookup requires the exact checksummed form returned at creation.
+CDP_WALLET_LOOKUP_ADDRESS = "0x716B5D6Bf67A4C01103B52365C8fB5fdFEf0ff06"
+
+
 ROUTE_ID = "cdp_agentkit_base_governed_asset_usdc_v2"
 CDP_NETWORK_ID = "base-mainnet"
 CDP_SWAP_NETWORK = "base"
@@ -430,7 +434,7 @@ class CdpAgentKitBackend:
     intentionally not exposed to strategy or model output.
     """
 
-    def __init__(self, *, wallet_address: str = AUTHORIZED_TREASURY_ADDRESS):
+    def __init__(self, *, wallet_address: str = CDP_WALLET_LOOKUP_ADDRESS):
         try:
             from coinbase_agentkit import (
                 CdpEvmWalletProvider,
