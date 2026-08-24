@@ -142,11 +142,11 @@ class PortfolioTradingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def execute(self, research, holdings, backend):
+    def execute(self, research, holdings, backend, risk_snapshot=None):
         return execute_research_portfolio_signal(
             research,
             holdings,
-            risk(),
+            risk_snapshot or risk(),
             universe(),
             backend,
             decision_journal_path=self.decisions,
@@ -167,6 +167,26 @@ class PortfolioTradingTests(unittest.TestCase):
         self.assertEqual(request.to_token, AERO_ADDRESS)
         self.assertEqual(request.from_amount, Decimal("20"))
         self.assertEqual(request.notional_usdc, Decimal("20"))
+
+    def test_buy_notional_rounds_down_to_official_usdc_precision(self) -> None:
+        total = Decimal("29.9803035152")
+        holdings = replace(
+            portfolio(),
+            total_value_usdc=total,
+            usdc_balance=Decimal("25"),
+        )
+        snapshot = replace(
+            risk(),
+            trading_capital_usdc=total,
+            portfolio_value_usdc=total,
+        )
+        backend = Backend()
+
+        result = self.execute(signal(), holdings, backend, snapshot)
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+        self.assertEqual(backend.requests[0].notional_usdc, Decimal("1.499015"))
+        self.assertEqual(backend.requests[0].from_amount, Decimal("1.499015"))
 
     def test_observation_only_research_packet_becomes_non_authoritative_signal(self) -> None:
         pair = {

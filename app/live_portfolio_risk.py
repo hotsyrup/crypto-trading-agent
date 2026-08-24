@@ -98,10 +98,14 @@ def _load(lines: list[str]) -> list[dict[str, object]]:
         else:
             high_water = max(high_water, current)
             if recorded_at.date() != daily_date:
-                assert previous_value is not None
+                if previous_value is None:
+                    raise LivePortfolioRiskError(
+                        "Risk journal is missing its previous portfolio value."
+                    )
                 daily_start = previous_value
                 daily_date = recorded_at.date()
-        assert daily_start is not None
+        if daily_start is None:
+            raise LivePortfolioRiskError("Risk journal is missing its daily start value.")
         expected_drawdown = _loss_percent(high_water, current)
         expected_daily = _loss_percent(daily_start, current)
         if (

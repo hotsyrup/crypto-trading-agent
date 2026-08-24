@@ -8,6 +8,7 @@ from pathlib import Path
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
 from app.controlled_live_execution import (
     CDP_NETWORK_ID,
+    NATIVE_ETH_ADDRESS,
     PERMIT2_ADDRESS,
     STATUS_CONFIRMED,
     SwapReceipt,
@@ -16,10 +17,12 @@ from app.live_portfolio_worker import (
     CYCLE_NO_FUNDS,
     CYCLE_POLICY_BLOCKED,
     OnchainTokenBalance,
+    _verified_portfolio,
     run_live_cycle,
 )
 from app.live_trading_config import BASE_USDC_ADDRESS, load_live_trading_config
 from app.research_agent import build_packet
+from app.portfolio_trading import ResearchSignal
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
     EXECUTOR_MODE_CONTROLLED_LIVE,
@@ -205,6 +208,59 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertEqual(result.portfolio_value_usdc, Decimal("25"))
         self.assertTrue(self.risk.exists())
         self.assertEqual(runtime.requests, [])
+
+    def test_native_eth_gas_reserve_is_not_tradable_portfolio_value(self) -> None:
+        governed = GovernedAssetUniverse(
+            observed_at=NOW - timedelta(minutes=5),
+            source="cross-verified-test",
+            snapshot_sha256="f" * 64,
+            assets=(
+                GovernedAsset(
+                    rank=1,
+                    symbol="ETH",
+                    name="Ether",
+                    token_address=None,
+                    decimals=18,
+                    market_cap_usd=Decimal("500000000000"),
+                    liquidity_usd=Decimal("100000000"),
+                    daily_volume_usd=Decimal("100000000"),
+                    oldest_pool_created_at=NOW - timedelta(days=1000),
+                ),
+            ),
+        )
+        signal = ResearchSignal(
+            packet_id="a" * 64,
+            observed_at=NOW - timedelta(seconds=10),
+            symbol="ETH",
+            token_address=None,
+            price_usd=Decimal("2462.10"),
+            liquidity_usd=Decimal("100000000"),
+            daily_volume_usd=Decimal("100000000"),
+            change_h6_percent=Decimal("1"),
+            change_h24_percent=Decimal("2"),
+            buys_h24=100,
+            sells_h24=90,
+        )
+
+        portfolio = _verified_portfolio(
+            (
+                OnchainTokenBalance(
+                    NATIVE_ETH_ADDRESS,
+                    Decimal("0.0020228"),
+                    18,
+                ),
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+            ),
+            (signal,),
+            governed,
+            wallet_address=AUTHORIZED_TREASURY_ADDRESS,
+            native_gas_reserve_eth=Decimal("0.0020228"),
+            now=NOW,
+        )
+
+        self.assertEqual(portfolio.total_value_usdc, Decimal("25"))
+        self.assertEqual(portfolio.usdc_balance, Decimal("25"))
+        self.assertEqual(portfolio.positions, ())
 
     def test_armed_cycle_submits_at_most_one_governed_trade(self) -> None:
         runtime = Runtime(

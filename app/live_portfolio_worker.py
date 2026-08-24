@@ -137,8 +137,11 @@ def _verified_portfolio(
     universe: GovernedAssetUniverse,
     *,
     wallet_address: str,
+    native_gas_reserve_eth: Decimal,
     now: datetime,
 ) -> VerifiedPortfolio:
+    if not native_gas_reserve_eth.is_finite() or native_gas_reserve_eth < 0:
+        raise ValueError("Native gas reserve must be finite and non-negative.")
     signal_by_identity = {
         (signal.symbol, signal.token_address): signal for signal in signals
     }
@@ -157,7 +160,13 @@ def _verified_portfolio(
             or not 0 <= balance.decimals <= 36
         ):
             raise ValueError("CDP returned an invalid token balance.")
-        if balance.amount == 0:
+        spendable_amount = balance.amount
+        if address == NATIVE_ETH_ADDRESS:
+            spendable_amount = max(
+                Decimal("0"),
+                balance.amount - native_gas_reserve_eth,
+            )
+        if spendable_amount == 0:
             continue
         if address == BASE_USDC_ADDRESS:
             if balance.decimals != 6:
@@ -177,12 +186,12 @@ def _verified_portfolio(
         signal = signal_by_identity.get((matched.symbol, matched.token_address))
         if signal is None:
             raise ValueError("A held governed asset has no fresh valuation signal.")
-        value = balance.amount * signal.price_usd
+        value = spendable_amount * signal.price_usd
         positions.append(
             PortfolioPosition(
                 symbol=matched.symbol,
                 token_address=matched.token_address,
-                token_balance=balance.amount,
+                token_balance=spendable_amount,
                 value_usdc=value,
                 average_entry_price_usdc=signal.price_usd,
             )
@@ -247,6 +256,7 @@ def run_live_cycle(
     decision_journal_path: Path,
     live_audit_path: Path,
     risk_journal_path: Path,
+    native_gas_reserve_eth: Decimal = Decimal("0"),
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
@@ -285,6 +295,7 @@ def run_live_cycle(
         signals,
         resolved_universe,
         wallet_address=wallet,
+        native_gas_reserve_eth=native_gas_reserve_eth,
         now=current_time,
     )
     if portfolio.total_value_usdc == 0:
@@ -403,6 +414,16 @@ def _worker_enabled() -> bool:
     return value == "true"
 
 
+def _native_gas_reserve() -> Decimal:
+    try:
+        value = Decimal(os.getenv("LIVE_NATIVE_GAS_RESERVE_ETH", "0"))
+    except InvalidOperation as error:
+        raise ValueError("LIVE_NATIVE_GAS_RESERVE_ETH is invalid.") from error
+    if not value.is_finite() or value < 0:
+        raise ValueError("LIVE_NATIVE_GAS_RESERVE_ETH must be finite and non-negative.")
+    return value
+
+
 def load_or_refresh_universe(path: Path, *, now: datetime) -> GovernedAssetUniverse:
     """Keep execution halted until a current exact-25 snapshot is available."""
 
@@ -415,8 +436,8 @@ def load_or_refresh_universe(path: Path, *, now: datetime) -> GovernedAssetUnive
 
 
 def main() -> None:
-    server = HTTPServer(  # nosec B104
-        ("0.0.0.0", int(os.getenv("PORT", "8080"))),
+    server = HTTPServer(
+        ("0.0.0.0", int(os.getenv("PORT", "8080"))),  # nosec B104
         HealthHandler,
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -452,6 +473,7 @@ def main() -> None:
                 decision_journal_path=Path("data/execution_decisions.jsonl"),
                 live_audit_path=Path("data/live_execution_audit.jsonl"),
                 risk_journal_path=Path("data/live_portfolio_risk.jsonl"),
+                native_gas_reserve_eth=_native_gas_reserve(),
                 now=cycle_time,
                 live_config=load_live_trading_config(),
                 executor_config=load_executor_config(),
