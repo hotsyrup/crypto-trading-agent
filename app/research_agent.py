@@ -593,8 +593,8 @@ def serve_health() -> TimedHTTPServer:
 def main() -> None:
     serve_health()
     interval = int(os.getenv("RESEARCH_INTERVAL_SECONDS", "3600"))
-    if not 300 <= interval <= 86400:
-        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 300 and 86400.")
+    if not 60 <= interval <= 86400:
+        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 60 and 86400.")
     while True:
         try:
             run_research_cycle()

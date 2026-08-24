@@ -18,6 +18,7 @@ from app.research_agent import (
     get_json,
     load_latest_packets,
     load_config,
+    main,
     public_health_state,
     public_route_response,
     run_research_cycle,
@@ -100,6 +101,19 @@ class ResearchAgentTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "between 60 and 86400"):
                 load_config()
+
+    @patch("app.research_agent.serve_health")
+    @patch("app.research_agent.run_research_cycle", side_effect=KeyboardInterrupt)
+    def test_research_process_accepts_one_minute_interval(self, run_cycle, serve_health) -> None:
+        with patch.dict(
+            os.environ,
+            {"RESEARCH_INTERVAL_SECONDS": "60"},
+            clear=True,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main()
+        serve_health.assert_called_once_with()
+        run_cycle.assert_called_once_with()
 
     def test_governed_universe_becomes_exact_research_watchlist(self) -> None:
         now = datetime.now(timezone.utc)
