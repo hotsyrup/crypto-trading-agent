@@ -564,7 +564,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
 
             def get_network(self):
                 return types.SimpleNamespace(
-                    chain_id=BASE_MAINNET_CHAIN_ID,
+                    chain_id=str(BASE_MAINNET_CHAIN_ID),
                     network_id=CDP_NETWORK_ID,
                 )
 
@@ -717,7 +717,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
 
             def get_network(self):
                 return types.SimpleNamespace(
-                    chain_id=BASE_MAINNET_CHAIN_ID,
+                    chain_id=str(BASE_MAINNET_CHAIN_ID),
                     network_id=CDP_NETWORK_ID,
                 )
 

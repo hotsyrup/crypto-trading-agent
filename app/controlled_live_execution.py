@@ -453,7 +453,10 @@ class CdpAgentKitBackend:
         if self._wallet.get_address().strip().lower() != wallet_address.strip().lower():
             raise RuntimeError("CDP wallet provider returned the wrong wallet.")
         network = self._wallet.get_network()
-        if network.chain_id != BASE_MAINNET_CHAIN_ID or network.network_id != CDP_NETWORK_ID:
+        if (
+            str(network.chain_id) != str(BASE_MAINNET_CHAIN_ID)
+            or network.network_id != CDP_NETWORK_ID
+        ):
             raise RuntimeError("CDP wallet provider returned the wrong network.")
 
     @property
