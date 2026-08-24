@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from app.base_asset_universe import GovernedAssetUniverse
 from app.live_asset_policy import evaluate_asset_identity
 from app.live_trading_config import (
     BASE_USDC_ADDRESS,
@@ -79,6 +80,7 @@ class RiskSnapshot:
     complete: bool = True
     contradictory: bool = False
     trading_capital_usdc: Decimal | None = None
+    portfolio_value_usdc: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -212,8 +214,9 @@ def evaluate_trade_intent(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    asset_universe: GovernedAssetUniverse | None = None,
 ) -> ExecutionDecision:
-    """Evaluate a proposed Base ETH/USDC spot trade without executing it.
+    """Evaluate a proposed governed Base spot trade without executing it.
 
     Shadow decisions remain non-executable. Controlled-live decisions can only
     become executable through the separately journaled CDP submission layer.
@@ -294,6 +297,7 @@ def evaluate_trade_intent(
         token_address=intent.asset_token_address,
         unsolicited=intent.unsolicited_asset,
         config=live,
+        universe=asset_universe,
     )
     if not asset_decision.allowed:
         reasons.append(asset_decision.reason)
@@ -302,11 +306,14 @@ def evaluate_trade_intent(
         token_address=intent.settlement_token_address,
         unsolicited=False,
         config=live,
+        universe=asset_universe,
     )
     if not settlement_decision.allowed:
         reasons.append(f"Settlement asset rejected: {settlement_decision.reason}")
-    if intent.asset_symbol.strip().upper() != "ETH":
-        reasons.append("This first executor supports ETH as the traded asset.")
+    if asset_universe is None and intent.asset_symbol.strip().upper() != "ETH":
+        reasons.append("The legacy executor supports ETH as the traded asset.")
+    if intent.asset_symbol.strip().upper() == "USDC":
+        reasons.append("USDC is the settlement asset and cannot be traded into itself.")
     if intent.settlement_symbol.strip().upper() != "USDC":
         reasons.append("This first executor supports USDC settlement only.")
     if (
@@ -335,15 +342,18 @@ def evaluate_trade_intent(
     ):
         reasons.append("Treasury value must be greater than zero.")
     if (
-        intent.treasury_value_usdc.is_finite()
-        and intent.treasury_value_usdc > MAX_TRADING_CAPITAL_USDC
+        executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+        and asset_universe is None
+        and side != "SELL"
     ):
-        reasons.append("Treasury value exceeds the $500 trading-capital ceiling.")
-
-    if executor.mode == EXECUTOR_MODE_CONTROLLED_LIVE and side != "SELL":
         reasons.append(
             "The only controlled-live route is native Base ETH to official Base USDC."
         )
+    if (
+        asset_universe is not None
+        and asset_universe.snapshot_sha256 not in intent.source_refs
+    ):
+        reasons.append("Trade intent is not bound to the governed universe snapshot.")
 
     daily_reason = _validated_percent(risk.daily_loss_percent, "Daily loss")
     drawdown_reason = _validated_percent(risk.drawdown_percent, "Drawdown")
@@ -368,9 +378,20 @@ def evaluate_trade_intent(
             reasons.append(
                 "Verified trading capital must be positive and at most $500."
             )
-        elif risk.trading_capital_usdc != intent.treasury_value_usdc:
+        verified_portfolio_value = (
+            risk.portfolio_value_usdc
+            if risk.portfolio_value_usdc is not None
+            else risk.trading_capital_usdc
+        )
+        if (
+            verified_portfolio_value is None
+            or not verified_portfolio_value.is_finite()
+            or verified_portfolio_value <= 0
+        ):
+            reasons.append("Controlled-live risk snapshot requires portfolio value.")
+        elif verified_portfolio_value != intent.treasury_value_usdc:
             reasons.append(
-                "Trade intent treasury value does not match verified trading capital."
+                "Trade intent treasury value does not match verified portfolio value."
             )
 
     if not reasons:
@@ -434,6 +455,7 @@ def process_shadow_trade_intent(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    asset_universe: GovernedAssetUniverse | None = None,
 ) -> ExecutorRunResult:
     """Evaluate and durably record one shadow intent, blocking replay.
 
@@ -453,6 +475,7 @@ def process_shadow_trade_intent(
         now=now,
         live_config=live_config,
         executor_config=executor_config,
+        asset_universe=asset_universe,
     )
     try:
         journal = append_execution_decision(

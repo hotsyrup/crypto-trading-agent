@@ -83,6 +83,74 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(path, Path("data/research_packets.sqlite3"))
         self.assertEqual(len(watchlist), 2)
 
+    def test_governed_universe_becomes_exact_research_watchlist(self) -> None:
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "universe.json"
+            assets = [
+                {
+                    "rank": 1,
+                    "symbol": "ETH",
+                    "name": "Ether",
+                    "token_address": None,
+                    "decimals": 18,
+                    "market_cap_usd": "1000000000",
+                    "liquidity_usd": "1000000",
+                    "daily_volume_usd": "1000000",
+                    "oldest_pool_created_at": "2025-01-01T00:00:00+00:00",
+                },
+                {
+                    "rank": 2,
+                    "symbol": "AERO",
+                    "name": "Aerodrome",
+                    "token_address": "0x940181a94a35a4569e4529a3cdfb74e38fd98631",
+                    "decimals": 18,
+                    "market_cap_usd": "450000000",
+                    "liquidity_usd": "25000000",
+                    "daily_volume_usd": "15000000",
+                    "oldest_pool_created_at": "2024-01-01T00:00:00+00:00",
+                },
+            ]
+            assets.extend(
+                {
+                    "rank": rank,
+                    "symbol": f"TOKEN{rank}",
+                    "name": f"Token {rank}",
+                    "token_address": f"0x{rank:040x}",
+                    "decimals": 18,
+                    "market_cap_usd": "100000000",
+                    "liquidity_usd": "1000000",
+                    "daily_volume_usd": "1000000",
+                    "oldest_pool_created_at": "2025-01-01T00:00:00+00:00",
+                }
+                for rank in range(3, 26)
+            )
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "network": "base-mainnet",
+                        "chain_id": 8453,
+                        "observed_at": now.isoformat(),
+                        "source": "reviewed-test-snapshot",
+                        "assets": assets,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "RESEARCH_ASSET_UNIVERSE_PATH": str(path),
+                    "RESEARCH_MAX_CANDIDATES": "25",
+                },
+                clear=True,
+            ):
+                *_, watchlist = load_config()
+        self.assertEqual(len(watchlist), 25)
+        self.assertEqual(watchlist[0], "0x4200000000000000000000000000000000000006")
+        self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
+
     @patch("app.research_agent.get_json")
     def test_fetch_pairs_uses_all_pools_endpoint_for_each_candidate(self, get_json) -> None:
         get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]

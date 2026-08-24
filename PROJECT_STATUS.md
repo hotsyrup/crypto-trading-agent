@@ -8,12 +8,12 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** Controlled-live execution implemented; activation still pending
+**Overall:** Governed top-25 controlled-live capability implemented; activation still pending
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
-- Core assets: USDC and ETH
+- Core assets: official Base USDC plus a fresh governed top-25 Base universe
 - Live trading: **disabled by default**
 - Unattended live execution: **implemented but disabled pending CDP/Railway setup**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
@@ -30,15 +30,22 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 - Run automated tests
 - Run the optional seven-day trending-token paper trial
 - Use project-scoped Base MCP configuration for interactive Base Account operations that require explicit human approval
-- Evaluate and reserve a bounded controlled-live native ETH-to-USDC swap
-- Submit that single route through a Coinbase CDP wallet supplied by AgentKit
+- Build a 25-asset universe from market-cap order cross-verified against exact
+  Base contracts, liquidity, volume, and pool age
+- Convert observation-only research into deterministic buy/sell proposals
+  without granting the research service execution authority
+- Evaluate and reserve bounded USDC-to-asset buys and asset-to-USDC sells
+- Submit exact-contract routes through a Coinbase CDP wallet supplied by AgentKit
+- Restrict ERC-20 Permit2 approvals to the exact token and input amount
 - Record hash-chained reservations, backend failures, rejected receipts, and confirmed transaction receipts
+- Persist live high-water-mark and UTC daily-loss state with fail-closed
+  corruption and clock-rollback handling
 
 ## Live Trading Guardrails Adopted
 
 The repository records the following bounded mandate:
 
-- USDC and ETH on Base only
+- Official Base USDC and at most 25 exact-contract governed Base assets
 - Maximum 20% allocation to one position
 - Maximum 5% initial allocation to a newly promoted strategy
 - Stop opening new positions after a 5% daily loss
@@ -59,8 +66,8 @@ the defaults.
 ## Required Before Unattended Live Trading
 
 - [x] Implement and unit-test the minimal CDP controlled-live order path
-- [ ] Implement high-water-mark accounting
-- [ ] Implement daily-loss accounting
+- [x] Implement high-water-mark accounting
+- [x] Implement daily-loss accounting
 - [x] Create durable audit records for every controlled-live decision and execution attempt
 - [x] Add stale market, risk, intent, and swap-quote protection
 - [x] Add and verify the in-process emergency kill switch
@@ -82,7 +89,9 @@ GitHub is the source of truth for code, documentation, tests, and deployment con
 The next deployment milestone is an always-on Railway deployment with a
 persistent volume mounted at `/app/data`. Railway must receive
 `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` through service
-variables; credentials must never be committed to GitHub. Before activation,
+variables; credentials must never be committed to GitHub. A scheduled refresh
+must maintain `data/base_top25_universe.json`, and both research and execution
+services must read that same persistent snapshot. Before activation,
 verify that those credentials resolve the exact adopted treasury on
 `base-mainnet`, then set all three activation gates deliberately:
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
@@ -113,11 +122,12 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Deploy and verify the controlled-live boundary without funding or arming it.**
+**Connect and verify the controlled-live inputs without funding or arming it.**
 
 The immediate engineering focus is Railway/CDP secret setup, persistent audit
-storage, verified live portfolio/P&L inputs, restart reconciliation, and an
-independent kill switch before a separately approved small canary.
+storage, scheduled universe refresh, a verified CDP balance/portfolio reader,
+restart reconciliation, and an independent kill switch before a separately
+approved small canary.
 
 ## Project Dashboard Roadmap
 

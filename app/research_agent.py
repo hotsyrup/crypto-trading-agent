@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from app.base_asset_universe import load_governed_asset_universe
 
 DEXSCREENER_ORIGIN = "https://api.dexscreener.com"
 ALLOWED_API_HOST = "api.dexscreener.com"
@@ -383,7 +384,7 @@ def store_packets(database_path: Path, packets: list[dict[str, object]]) -> int:
 
 def load_latest_packets(
     database_path: Path,
-    limit: int = 20,
+    limit: int = 25,
     now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Read recent public packets without creating or modifying the database."""
@@ -439,6 +440,13 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
         ).split(",")
         if address.strip()
     )
+    universe_path = os.getenv("RESEARCH_ASSET_UNIVERSE_PATH", "").strip()
+    if universe_path:
+        universe = load_governed_asset_universe(Path(universe_path))
+        watchlist = tuple(
+            WETH_CONTRACT if asset.token_address is None else asset.token_address
+            for asset in universe.assets
+        )
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in watchlist):
         raise ValueError("RESEARCH_WATCHLIST contains an invalid contract address.")
     if len(watchlist) > limit:

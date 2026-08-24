@@ -3,8 +3,8 @@
 ## Current State
 
 The deterministic `TradeIntent` and risk gate now has two modes. `shadow_only`
-is the default and cannot submit. `controlled_live` can submit exactly one
-risk-reducing Base route through a Coinbase CDP wallet supplied by AgentKit,
+is the default and cannot submit. `controlled_live` can submit exact-contract
+Base spot buys and sells through a Coinbase CDP wallet supplied by AgentKit,
 but only when live trading and the independent kill switch are also enabled.
 
 No strategy, model output, research feed, or backend response can raise the
@@ -17,9 +17,9 @@ hard limits or expand the route.
 3. The Executor verifies wallet, recipient, Base chain, exact assets, spot-only
    scope, freshness, replay identity, position limits, and kill-switch state.
 4. The decision is durably recorded in `execution_decisions.jsonl`.
-5. A fresh `ApprovedSwap` binds the CDP quote ID and timestamp to the exact
-   native ETH input, official Base USDC output, wallet, chain, notional, and
-   slippage.
+5. A fresh `ApprovedSwap` binds the CDP quote ID and timestamp to official Base
+   USDC and one exact governed token contract, its decimals, wallet, chain,
+   notional, and slippage.
 6. The live journal atomically reserves the notional against the UTC daily cap.
 7. The CDP adapter creates a slippage-bound quote, executes it, waits for the
    onchain receipt, and returns normalized evidence.
@@ -29,14 +29,31 @@ hard limits or expand the route.
 
 - Maximum notional: $20 per intent.
 - Maximum reserved notional: $100 per UTC day.
-- Maximum reported trading capital: $500.
+- Maximum authorized contributed trading capital: $500; gains may make the
+  verified portfolio value higher.
 - Maximum slippage: 100 basis points.
 - Wallet: the adopted treasury only.
 - Network: Base mainnet, chain ID 8453 only.
-- Route: native ETH (`0xeeee...eeee`) to official Base USDC only.
-- Direction: SELL only; BUY is not implemented in controlled-live mode.
+- Route: official Base USDC to one governed asset, or that exact asset back to
+  official Base USDC.
+- Direction: BUY and SELL.
 - Product: unleveraged spot only.
-- Approval transactions: prohibited for this route.
+- Approval transactions: exact-amount Permit2 only for ERC-20 input; native ETH
+  needs no approval. Wrong or unlimited approvals fail closed.
+
+The eligible universe contains exactly 25 assets and expires after 24 hours.
+The refresh job combines CoinGecko's Base ecosystem market-cap ordering with
+GeckoTerminal's exact-contract metadata, liquidity, 24-hour volume, and oldest
+pool date. Assets below $100,000 liquidity, below $100,000 daily volume, or
+younger than 30 days are excluded. USDC is the settlement asset and does not
+consume one of the 25 slots. WETH evidence maps to native ETH for execution.
+
+Research is not authority. Packets must remain `OBSERVE_ONLY`, name the exact
+governed contract, be fresh, come from the configured watchlist, and pass the
+same liquidity and volume floor. The portfolio interface independently checks
+the wallet snapshot and risk ledger, then uses simple momentum entries plus 8%
+stop-loss and 15% take-profit exits. The bot is long-only: it may retreat to
+USDC during a decline, but it cannot short or guarantee positive returns.
 
 The daily journal counts reservations, not only successful receipts. A backend
 failure, timeout, crash after reservation, or receipt mismatch continues to
@@ -76,8 +93,10 @@ the adapter then uses its CDP client to create a quote with the approved
 slippage, execute it, and await a Base receipt. The generic natural-language
 AgentKit tool surface is never exposed to strategy or model output.
 
-The production route starts with native ETH, so it does not need an ERC-20
-allowance and rejects any receipt that reports an approval transaction.
+The adapter handles native ETH without an approval. For ERC-20 inputs it reads
+the current allowance and replaces missing, stale, or oversized permission
+with an exact-amount approval to Coinbase's Permit2 spender. The audited receipt
+must match the exact token, spender, and amount.
 
 ## Journals and Recovery
 
@@ -101,10 +120,15 @@ event is ambiguous and remains charged to the daily ceiling.
 4. Mount and verify persistent `/app/data` storage across a redeploy.
 5. Verify the deployed commit, `base-mainnet`, chain ID 8453, and exact wallet
    identity with no funds present.
-6. Bind a verified live portfolio/P&L reader to the supplied `RiskSnapshot`.
-7. Exercise restart, timeout, ambiguous receipt, and external emergency-stop
+6. Schedule `python -m app.base_asset_universe_refresh` and configure both
+   `LIVE_ASSET_UNIVERSE_PATH` and `RESEARCH_ASSET_UNIVERSE_PATH` to the same
+   persistent snapshot.
+7. Bind a verified CDP balance reader to `VerifiedPortfolio`; do not derive
+   balances or cost basis from research packets.
+8. Feed each verified mark through the persistent live portfolio-risk ledger.
+9. Exercise restart, timeout, ambiguous receipt, approval, and external emergency-stop
    recovery in a production-like environment.
-8. Obtain separate approval before arming, depositing funds, or sending a first
+10. Obtain separate approval before arming, depositing funds, or sending a first
    small canary.
 
 Secrets, owner private keys, seed phrases, wallet exports, and approval links
