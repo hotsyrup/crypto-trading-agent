@@ -40,6 +40,24 @@ from app.trading_executor import (
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 AERO_ADDRESS = "0x940181a94a35a4569e4529a3cdfb74e38fd98631"
+CHECKSUM_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+CHECKSUM_PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+CHECKSUM_AERO_ADDRESS = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+
+
+def checksum_address(address: str) -> str:
+    return {
+        BASE_USDC_ADDRESS: CHECKSUM_USDC_ADDRESS,
+        PERMIT2_ADDRESS: CHECKSUM_PERMIT2_ADDRESS,
+        AERO_ADDRESS: CHECKSUM_AERO_ADDRESS,
+    }.get(address.lower(), address)
+
+
+def agentkit_modules(module: object) -> dict[str, object]:
+    return {
+        "coinbase_agentkit": module,
+        "eth_utils": types.SimpleNamespace(to_checksum_address=checksum_address),
+    }
 
 
 def controlled_config(state: str = KILL_SWITCH_ARMED) -> ExecutorConfig:
@@ -575,7 +593,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             CdpEvmWalletProvider=Wallet,
             CdpEvmWalletProviderConfig=Config,
         )
-        with patch.dict("sys.modules", {"coinbase_agentkit": module}):
+        with patch.dict("sys.modules", agentkit_modules(module)):
             balances = CdpAgentKitBackend().list_token_balances()
 
         self.assertEqual(calls, [None, "page-2"])
@@ -660,16 +678,22 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             from_decimals=6,
             to_decimals=18,
         )
-        with patch.dict("sys.modules", {"coinbase_agentkit": module}):
+        with patch.dict("sys.modules", agentkit_modules(module)):
             result = CdpAgentKitBackend().submit_swap(order)
 
         approval = calls["approval"]
-        self.assertEqual(approval["to"], BASE_USDC_ADDRESS)
+        self.assertEqual(approval["to"], CHECKSUM_USDC_ADDRESS)
         self.assertTrue(str(approval["data"]).startswith("0x095ea7b3"))
         self.assertTrue(str(approval["data"]).endswith(f"{20 * 10**6:064x}"))
         self.assertEqual(result.approval_spender, PERMIT2_ADDRESS)
         self.assertEqual(result.approval_amount, Decimal("20"))
         self.assertEqual(calls["quote"]["from_amount"], str(20 * 10**6))
+        self.assertEqual(calls["quote"]["from_token"], CHECKSUM_USDC_ADDRESS)
+        self.assertEqual(calls["quote"]["to_token"], CHECKSUM_AERO_ADDRESS)
+        self.assertEqual(
+            calls["allowance"]["args"][1],
+            CHECKSUM_PERMIT2_ADDRESS,
+        )
         self.assertEqual(result.to_amount, Decimal("40"))
 
     def test_adapter_binds_slippage_idempotency_wallet_and_base_receipt(self) -> None:
@@ -732,7 +756,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             CdpEvmWalletProvider=Wallet,
             CdpEvmWalletProviderConfig=Config,
         )
-        with patch.dict("sys.modules", {"coinbase_agentkit": module}):
+        with patch.dict("sys.modules", agentkit_modules(module)):
             result = CdpAgentKitBackend().submit_swap(swap())
 
         self.assertTrue(result.success)
@@ -804,7 +828,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             CdpEvmWalletProvider=Wallet,
             CdpEvmWalletProviderConfig=Config,
         )
-        with patch.dict("sys.modules", {"coinbase_agentkit": module}):
+        with patch.dict("sys.modules", agentkit_modules(module)):
             backend = CdpAgentKitBackend()
             with self.assertRaisesRegex(RuntimeError, "notional boundary"):
                 backend.submit_swap(swap())

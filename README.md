@@ -194,14 +194,18 @@ persistent volume at `/app/data`. Production now has `CDP_API_KEY_ID`,
 for the pinned wallet above. Never paste those values into GitHub, logs,
 prompts, or committed files.
 
-Production has completed the no-funds check with `LIVE_WORKER_ENABLED=true`,
+Production has verified the dedicated wallet with 25 USDC. The first $1.25
+canary was reserved and then failed closed at the AgentKit address boundary;
+the audit journal records `BACKEND_FAILED`, and no confirmed swap receipt was
+recorded. The checksummed-address correction is deployed with
+`LIVE_WORKER_ENABLED=true`,
 `LIVE_TRADING_ENABLED=false`, `TRADING_EXECUTOR_MODE=shadow_only`, and the kill
-switch halted. The deployed worker verified the pinned wallet on
-`base-mainnet`, chain ID 8453, and reached `no_funds_ready`. Only after separate
-approval for a small canary should an operator set
+switch halted. The deployed worker verifies the pinned wallet on
+`base-mainnet`, chain ID 8453, and reports the expected `policy_blocked` safe
+state. Only after explicit approval for the corrected canary should an operator set
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
-`TRADING_EXECUTOR_KILL_SWITCH=armed`. Funding and a first canary remain separate
-human actions. Research packets are never accepted as wallet-balance evidence.
+`TRADING_EXECUTOR_KILL_SWITCH=armed`. Research packets are never accepted as
+wallet-balance evidence.
 
 ### Run the Paper Bot
 

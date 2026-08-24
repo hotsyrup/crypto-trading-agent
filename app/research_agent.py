@@ -157,13 +157,10 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
         raise ValueError("DEX Screener accepts at most 30 token addresses per batch.")
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
-    pairs: list[dict[str, object]] = []
-    for address in addresses:
-        payload = get_json(f"/token-pairs/v1/base/{address}")
-        if not isinstance(payload, list):
-            raise ValueError("DEX Screener token-pairs response must be a list.")
-        pairs.extend(pair for pair in payload if isinstance(pair, dict))
-    return pairs
+    payload = get_json(f"/tokens/v1/base/{','.join(addresses)}")
+    if not isinstance(payload, list):
+        raise ValueError("DEX Screener tokens response must be a list.")
+    return [pair for pair in payload if isinstance(pair, dict)]
 
 
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
@@ -424,8 +421,8 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     limit = int(os.getenv("RESEARCH_MAX_CANDIDATES", "10"))
     freshness = int(os.getenv("RESEARCH_FRESHNESS_MINUTES", "90"))
     minimum_liquidity = Decimal(os.getenv("RESEARCH_MIN_LIQUIDITY_USD", "50000"))
-    if not 300 <= interval <= 86400:
-        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 300 and 86400.")
+    if not 60 <= interval <= 86400:
+        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 60 and 86400.")
     if not 1 <= limit <= MAX_API_CANDIDATES:
         raise ValueError("RESEARCH_MAX_CANDIDATES must be between 1 and 30.")
     if not 5 <= freshness <= 1440:
@@ -469,10 +466,13 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
 
 def run_research_cycle() -> int:
     _, limit, minimum_liquidity, freshness, database_path, watchlist = load_config()
-    received_at = _utc_now()
+    cycle_started_at = _utc_now()
     profiles = discover_base_contracts(limit, watchlist)
     addresses = [str(profile["contract_address"]) for profile in profiles]
     pairs = fetch_pairs(addresses)
+    received_at = _utc_now()
+    if received_at < cycle_started_at:
+        raise ValueError("Research provider cycle completion precedes its start.")
     packets = []
     for profile in profiles:
         contract_address = str(profile["contract_address"])
@@ -593,8 +593,8 @@ def serve_health() -> TimedHTTPServer:
 def main() -> None:
     serve_health()
     interval = int(os.getenv("RESEARCH_INTERVAL_SECONDS", "3600"))
-    if not 300 <= interval <= 86400:
-        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 300 and 86400.")
+    if not 60 <= interval <= 86400:
+        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 60 and 86400.")
     while True:
         try:
             run_research_cycle()

@@ -106,6 +106,21 @@ def _aware(value: datetime) -> bool:
     return value.tzinfo is not None and value.utcoffset() is not None
 
 
+def _checksum_address(address: str) -> str:
+    """Return the canonical EVM address required by AgentKit's web3 boundary."""
+
+    try:
+        from eth_utils import to_checksum_address
+    except ImportError as error:
+        raise RuntimeError(
+            "eth-utils is required for controlled-live EVM address handling."
+        ) from error
+    try:
+        return str(to_checksum_address(address))
+    except ValueError as error:
+        raise ValueError("CDP backend received an invalid EVM address.") from error
+
+
 def _validate_swap(
     swap: ApprovedSwap,
     intent: TradeIntent,
@@ -485,6 +500,10 @@ class CdpAgentKitBackend:
             raise ValueError("CDP backend received an invalid atomic input amount.")
         atomic_input = int(atomic_value)
         approval_transaction_hash: str | None = None
+        checksum_from_token = _checksum_address(request.from_token)
+        checksum_to_token = _checksum_address(request.to_token)
+        checksum_wallet = _checksum_address(self._wallet.get_address())
+        checksum_permit2 = _checksum_address(PERMIT2_ADDRESS)
 
         if request.from_token.lower() != NATIVE_ETH_ADDRESS:
             allowance_abi = [
@@ -501,10 +520,10 @@ class CdpAgentKitBackend:
             ]
             current_allowance = int(
                 self._wallet.read_contract(
-                    contract_address=request.from_token,
+                    contract_address=checksum_from_token,
                     abi=allowance_abi,
                     function_name="allowance",
-                    args=[self._wallet.get_address(), PERMIT2_ADDRESS],
+                    args=[checksum_wallet, checksum_permit2],
                 )
             )
             if current_allowance != atomic_input:
@@ -514,7 +533,7 @@ class CdpAgentKitBackend:
                 approval_transaction_hash = str(
                     self._wallet.send_transaction(
                         {
-                            "to": request.from_token,
+                            "to": checksum_from_token,
                             "value": 0,
                             "data": approval_data,
                         }
@@ -538,8 +557,8 @@ class CdpAgentKitBackend:
                     address=self._wallet.get_address()
                 )
                 quote = await account.quote_swap(
-                    from_token=request.from_token,
-                    to_token=request.to_token,
+                    from_token=checksum_from_token,
+                    to_token=checksum_to_token,
                     from_amount=str(atomic_input),
                     network=CDP_SWAP_NETWORK,
                     slippage_bps=request.slippage_bps,
