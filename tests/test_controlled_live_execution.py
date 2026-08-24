@@ -738,7 +738,7 @@ class CdpAgentKitBackendTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.quote_id, "executed-cdp-quote")
         self.assertEqual(calls["config"], {
-            "address": AUTHORIZED_TREASURY_ADDRESS,
+            "address": "0x716B5D6Bf67A4C01103B52365C8fB5fdFEf0ff06",
             "network_id": CDP_NETWORK_ID,
         })
         quote_call = calls["quote"]
