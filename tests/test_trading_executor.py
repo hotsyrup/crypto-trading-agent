@@ -118,7 +118,7 @@ class TradingExecutorTests(unittest.TestCase):
             executor_config=executor_config(),
         )
         self.assertEqual(decision.status, STATUS_REJECTED)
-        self.assertIn("refuses LIVE_TRADING_ENABLED=true", " ".join(decision.reasons))
+        self.assertIn("shadow_only requires", " ".join(decision.reasons))
 
     def test_wrong_account_chain_or_recipient_is_rejected(self) -> None:
         wrong_address = "0x" + "1" * 40
