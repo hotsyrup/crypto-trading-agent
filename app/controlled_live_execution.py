@@ -41,6 +41,7 @@ CDP_SWAP_NETWORK = "base"
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 PERMIT2_ADDRESS = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 MAX_SLIPPAGE_BPS = 100
+RECEIPT_SLIPPAGE_BPS_TOLERANCE = Decimal("0.000001")
 TRANSACTION_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}")
 
 STATUS_CONFIRMED = "CONFIRMED"
@@ -262,7 +263,7 @@ def _validate_receipt(
         (receipt.to_amount - receipt.min_to_amount)
         * Decimal("10000")
         / receipt.to_amount
-        > request.slippage_bps
+        > Decimal(request.slippage_bps) + RECEIPT_SLIPPAGE_BPS_TOLERANCE
     ):
         reasons.append("CDP receipt minimum output exceeds approved slippage.")
     approval_values = (
