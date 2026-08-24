@@ -436,8 +436,8 @@ def load_or_refresh_universe(path: Path, *, now: datetime) -> GovernedAssetUnive
 
 
 def main() -> None:
-    server = HTTPServer(  # nosec B104
-        ("0.0.0.0", int(os.getenv("PORT", "8080"))),
+    server = HTTPServer(
+        ("0.0.0.0", int(os.getenv("PORT", "8080"))),  # nosec B104
         HealthHandler,
     )
     threading.Thread(target=server.serve_forever, daemon=True).start()
