@@ -184,21 +184,24 @@ steps.
 ### Railway and CDP activation (remaining operator work)
 
 The main Docker image installs the pinned `coinbase-agentkit` production
-adapter. In Railway, mount a persistent volume at `/app/data`, schedule a fresh
-governed-universe snapshot, then add
+adapter and starts `app.live_portfolio_worker`. The worker is inert unless
+`LIVE_WORKER_ENABLED=true`; while enabled it verifies the exact CDP wallet and
+Base network, reads paginated onchain balances, maintains a fresh governed
+universe, values only governed holdings from fresh research, records portfolio
+risk, and makes at most one controlled attempt per cycle. In Railway, mount a
+persistent volume at `/app/data`, then add
 `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` as service
 variables. Never paste those values into GitHub, logs, prompts, or committed
 files.
 
-Deploy first with the defaults (`LIVE_TRADING_ENABLED=false`,
+Deploy first with the defaults (`LIVE_WORKER_ENABLED=false`,
+`LIVE_TRADING_ENABLED=false`,
 `TRADING_EXECUTOR_MODE=shadow_only`, kill switch halted). Verify the deployed
-commit, durable journal writes, Base mainnet chain ID, and exact treasury
-address. Only after a separate no-funds review should an operator set
+commit, then enable only `LIVE_WORKER_ENABLED=true` for the no-funds wallet and
+network check. Only after that check should an operator set
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`. Funding and a first canary remain separate
-human actions; this pull request does not deploy, arm, fund, or trade. A
-verified CDP portfolio reader must also supply current balances and
-mark-to-market values; research packets are never wallet-balance evidence.
+human actions. Research packets are never accepted as wallet-balance evidence.
 
 ### Run the Paper Bot
 
@@ -348,12 +351,12 @@ enabled. No API key or wallet funding is required.
 
 ## Project Status
 
-The live mandate, treasury identity, and minimal CDP execution adapter are
-implemented, but execution remains disabled by default. The only controlled
-route is a bounded native Base ETH-to-USDC risk-reducing swap. The next
-milestone is Railway/CDP configuration plus a verified live portfolio reader,
-restart/timeout reconciliation, and an independently exercised emergency stop.
-Any funding or live canary remains a separate activation gate.
+The live mandate, treasury identity, governed top-25 execution adapter, CDP
+balance reader, and runnable Railway worker are implemented, but execution
+remains disabled by default. The next milestone is the no-funds CDP/Railway
+identity check followed by one separately approved small canary. Restart and
+ambiguous-timeout reservations remain fail-closed and require explicit
+reconciliation rather than automatic retry.
 
 ## Disclaimer
 

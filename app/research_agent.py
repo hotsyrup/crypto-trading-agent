@@ -22,7 +22,8 @@ from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from app.base_asset_universe import load_governed_asset_universe
+from app.base_asset_universe import AssetUniverseError, load_governed_asset_universe
+from app.base_asset_universe_refresh import refresh_governed_asset_universe
 
 DEXSCREENER_ORIGIN = "https://api.dexscreener.com"
 ALLOWED_API_HOST = "api.dexscreener.com"
@@ -442,7 +443,19 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     )
     universe_path = os.getenv("RESEARCH_ASSET_UNIVERSE_PATH", "").strip()
     if universe_path:
-        universe = load_governed_asset_universe(Path(universe_path))
+        path = Path(universe_path)
+        try:
+            universe = load_governed_asset_universe(path)
+        except AssetUniverseError:
+            if (
+                os.getenv("RESEARCH_REFRESH_ASSET_UNIVERSE", "false")
+                .strip()
+                .lower()
+                != "true"
+            ):
+                raise
+            refresh_governed_asset_universe(path)
+            universe = load_governed_asset_universe(path)
         watchlist = tuple(
             WETH_CONTRACT if asset.token_address is None else asset.token_address
             for asset in universe.assets
@@ -507,7 +520,9 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
     if path in {"/", "/health"}:
         return (200 if STATE["status"] != "failed" else 503, public_health_state())
     if path in {BASE_RESEARCH_PATH, LEGACY_RESEARCH_PATH}:
-        *_, database_path, _ = load_config()
+        database_path = Path(
+            os.getenv("RESEARCH_DB_PATH", "data/research_packets.sqlite3")
+        )
         return (
             200 if STATE["status"] != "failed" else 503,
             {
@@ -576,8 +591,10 @@ def serve_health() -> TimedHTTPServer:
 
 
 def main() -> None:
-    interval, *_ = load_config()
     serve_health()
+    interval = int(os.getenv("RESEARCH_INTERVAL_SECONDS", "3600"))
+    if not 300 <= interval <= 86400:
+        raise ValueError("RESEARCH_INTERVAL_SECONDS must be between 300 and 86400.")
     while True:
         try:
             run_research_cycle()

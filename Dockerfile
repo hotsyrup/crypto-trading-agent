@@ -21,4 +21,4 @@ RUN mkdir /app/data \
     && chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["python", "-m", "app.shadow_monitor"]
+CMD ["python", "-m", "app.live_portfolio_worker"]

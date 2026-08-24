@@ -40,6 +40,9 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 - Record hash-chained reservations, backend failures, rejected receipts, and confirmed transaction receipts
 - Persist live high-water-mark and UTC daily-loss state with fail-closed
   corruption and clock-rollback handling
+- Run a disabled-by-default Railway worker that verifies the CDP wallet and
+  Base network, reads paginated balances, maintains the universe, and permits
+  at most one governed attempt per cycle
 
 ## Live Trading Guardrails Adopted
 
@@ -74,6 +77,7 @@ the defaults.
 - [ ] Verify Railway production configuration and secret handling
 - [ ] Run end-to-end paper tests under production-like conditions
 - [x] Unit-test live limits against strategy and backend bypass attempts
+- [x] Implement the verified CDP balance/portfolio reader and runnable worker
 - [ ] Reconcile live wallet balances and confirmed receipts after restart/provider timeouts
 - [ ] Independently verify the kill switch outside the executor process
 - [ ] Complete a small-capital controlled live validation before scaling
@@ -86,12 +90,10 @@ GitHub is the source of truth for code, documentation, tests, and deployment con
 
 ### Railway
 
-The next deployment milestone is an always-on Railway deployment with a
-persistent volume mounted at `/app/data`. Railway must receive
+Railway has a healthy persistent volume mounted at `/app/data`. It must receive
 `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` through service
-variables; credentials must never be committed to GitHub. A scheduled refresh
-must maintain `data/base_top25_universe.json`, and both research and execution
-services must read that same persistent snapshot. Before activation,
+variables; credentials must never be committed to GitHub. The execution and
+research workers refresh their own exact-25 snapshots before using them. Before activation,
 verify that those credentials resolve the exact adopted treasury on
 `base-mainnet`, then set all three activation gates deliberately:
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
@@ -124,10 +126,8 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 **Connect and verify the controlled-live inputs without funding or arming it.**
 
-The immediate engineering focus is Railway/CDP secret setup, persistent audit
-storage, scheduled universe refresh, a verified CDP balance/portfolio reader,
-restart reconciliation, and an independent kill switch before a separately
-approved small canary.
+The immediate focus is CDP secret setup, a no-funds exact-wallet/network check,
+top-25 research-feed verification, and one separately approved small canary.
 
 ## Project Dashboard Roadmap
 
