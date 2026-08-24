@@ -88,8 +88,8 @@ gateway does not give scheduled jobs or the container unattended wallet access.
 
 The app keeps two Base wallet roles separate:
 
-* **Trading treasury:** `ihaveonefriend.base.eth`, resolved and pinned as
-  `0x3c981ec319107be8b8bb614da0742fc5b28e8d9c`
+* **Trading treasury:** the CDP API-key wallet `lumen-trading-agent`, created
+  and pinned as `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`
 * **Lumen Agentic Wallet:** configured separately through
   `LUMEN_AGENTIC_WALLET_ADDRESS`; do not commit its credentials
 
@@ -181,7 +181,7 @@ Both remain excluded from Git and require persistent Railway storage. See
 `docs/LUMEN_TRADING_EXECUTOR.md` for the contract and remaining activation
 steps.
 
-### Railway and CDP activation (remaining operator work)
+### Railway and CDP activation
 
 The main Docker image installs the pinned `coinbase-agentkit` production
 adapter and starts `app.live_portfolio_worker`. The worker is inert unless
@@ -189,10 +189,10 @@ adapter and starts `app.live_portfolio_worker`. The worker is inert unless
 Base network, reads paginated onchain balances, maintains a fresh governed
 universe, values only governed holdings from fresh research, records portfolio
 risk, and makes at most one controlled attempt per cycle. In Railway, mount a
-persistent volume at `/app/data`, then add
-`CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` as service
-variables. Never paste those values into GitHub, logs, prompts, or committed
-files.
+persistent volume at `/app/data`. Production now has `CDP_API_KEY_ID`,
+`CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` stored as masked service variables
+for the pinned wallet above. Never paste those values into GitHub, logs,
+prompts, or committed files.
 
 Deploy first with the defaults (`LIVE_WORKER_ENABLED=false`,
 `LIVE_TRADING_ENABLED=false`,

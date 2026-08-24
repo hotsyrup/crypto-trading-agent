@@ -20,7 +20,7 @@ from app.live_trading_config import (
 
 BASE_MAINNET_CHAIN_ID = 8453
 AUTHORIZED_TREASURY_ADDRESS = (
-    "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c"
+    "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06"
 )
 EXECUTOR_MODE_SHADOW_ONLY = "shadow_only"
 EXECUTOR_MODE_CONTROLLED_LIVE = "controlled_live"

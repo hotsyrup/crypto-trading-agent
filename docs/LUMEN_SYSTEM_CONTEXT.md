@@ -50,7 +50,8 @@ switch.
 
 ## Initial Mandate Summary
 
-- Authorized Base treasury: `ihaveonefriend.base.eth`
+- Authorized Base treasury: CDP API-key wallet `lumen-trading-agent` at
+  `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`
 - Initial approved assets: USDC and ETH on Base
 - Maximum position: 20% of treasury value
 - Maximum new-strategy canary: 5%

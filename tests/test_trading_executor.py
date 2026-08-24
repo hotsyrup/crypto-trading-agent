@@ -133,6 +133,27 @@ class TradingExecutorTests(unittest.TestCase):
         self.assertIn("outside the adopted mandate", text)
         self.assertIn("Base mainnet", text)
 
+    def test_only_the_verified_cdp_wallet_is_authorized(self) -> None:
+        verified_cdp_wallet = "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06"
+        retired_external_treasury = "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c"
+
+        accepted = self.evaluate(
+            trade_intent(
+                treasury_address=verified_cdp_wallet,
+                recipient_address=verified_cdp_wallet,
+            )
+        )
+        rejected = self.evaluate(
+            trade_intent(
+                treasury_address=retired_external_treasury,
+                recipient_address=retired_external_treasury,
+            )
+        )
+
+        self.assertEqual(accepted.status, STATUS_SHADOW_APPROVED)
+        self.assertEqual(rejected.status, STATUS_REJECTED)
+        self.assertIn("outside the adopted mandate", " ".join(rejected.reasons))
+
     def test_proceeds_cannot_be_redirected(self) -> None:
         decision = self.evaluate(
             trade_intent(recipient_address="0x" + "2" * 40)

@@ -111,15 +111,17 @@ Mount `/app/data` on a persistent Railway volume. Missing, corrupt, unwritable,
 or inconsistent journal state blocks execution. A reservation without a final
 event is ambiguous and remains charged to the daily ceiling.
 
-## Remaining Railway / CDP Setup
+## Railway / CDP Activation Status
 
-1. Create or select the CDP EVM server wallet whose address is exactly the
-   adopted trading treasury; do not let the runtime create an unreviewed wallet.
-2. Add `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` only as
-   Railway service variables.
-3. Deploy with `LIVE_WORKER_ENABLED=false`, live disabled, and the kill switch halted.
-4. Verify the existing persistent `/app/data` storage across the redeploy.
-5. Set only `LIVE_WORKER_ENABLED=true` and verify the deployed commit,
+1. Coinbase created the reviewed CDP EVM API-key wallet
+   `lumen-trading-agent` at
+   `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`.
+2. `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` are stored
+   only as masked Railway service variables.
+3. Railway deployed them with `LIVE_WORKER_ENABLED=false`, live disabled, and
+   the kill switch halted.
+4. The existing persistent `/app/data` storage remains mounted across redeploys.
+5. Next, set only `LIVE_WORKER_ENABLED=true` and verify the deployed commit,
    `base-mainnet`, chain ID 8453, and exact wallet
    identity with no funds present.
 6. Configure the research service for 25 candidates and automatic governed

@@ -8,9 +8,9 @@ from app.wallet_config import load_wallet_config
 class WalletConfigTests(unittest.TestCase):
     def test_loads_separate_trading_and_agentic_wallets(self) -> None:
         environment = {
-            "BASE_TRADING_WALLET_NAME": "ihaveonefriend.base.eth",
+            "BASE_TRADING_WALLET_NAME": "lumen-trading-agent",
             "BASE_TRADING_WALLET_ADDRESS": (
-                "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c"
+                "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06"
             ),
             "LUMEN_AGENTIC_WALLET_ADDRESS": (
                 "0xfDfaDd01eDcBaBE025931e45cdc8532B00218500"
@@ -20,10 +20,10 @@ class WalletConfigTests(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             config = load_wallet_config()
 
-        self.assertEqual(config.trading_wallet_name, "ihaveonefriend.base.eth")
+        self.assertEqual(config.trading_wallet_name, "lumen-trading-agent")
         self.assertEqual(
             config.trading_wallet_address,
-            "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c",
+            "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06",
         )
         self.assertEqual(
             config.agentic_wallet_address,
@@ -31,9 +31,9 @@ class WalletConfigTests(unittest.TestCase):
         )
 
     def test_rejects_same_address_for_both_wallet_roles(self) -> None:
-        address = "0x3c981ec319107be8b8bb614da0742fc5b28e8d9c"
+        address = "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06"
         environment = {
-            "BASE_TRADING_WALLET_NAME": "ihaveonefriend.base.eth",
+            "BASE_TRADING_WALLET_NAME": "lumen-trading-agent",
             "BASE_TRADING_WALLET_ADDRESS": address,
             "LUMEN_AGENTIC_WALLET_ADDRESS": address,
         }
