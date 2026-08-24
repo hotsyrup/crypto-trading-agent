@@ -102,9 +102,11 @@ or approval credentials to the repository or Railway environment.
 Ben adopted a bounded live mandate on 2026-08-06. The application now carries
 the initial limits as validated environment configuration:
 
-* USDC and ETH on Base only
-* Base USDC is pinned to its exact contract address; copied symbols and
+* Official Base USDC plus at most 25 governed Base spot assets
+* Every ERC-20 is pinned to its exact contract address; copied symbols and
   unsolicited assets fail closed
+* The governed universe must be a fresh, cross-provider snapshot with minimum
+  liquidity, volume, and pool-age checks
 * 20% maximum allocation to one position
 * 5% maximum initial allocation to a newly promoted strategy
 * Stop new positions after a 5% daily loss
@@ -124,8 +126,9 @@ accepts a structured trade intent and current risk snapshot, then verifies:
 
 * the exact authorized Base treasury and return address
 * Base mainnet chain ID 8453
-* native ETH and the official Base USDC contract
-* ETH/USDC unleveraged spot scope only
+* the official Base USDC contract and an exact-contract asset in the governed
+  top-25 snapshot
+* USDC-to-asset buys and asset-to-USDC sells, unleveraged spot only
 * the 20% position and 5% new-strategy limits
 * the 5% daily-loss and 20% drawdown halts
 * fresh, timezone-aware market, risk, and intent timestamps
@@ -143,13 +146,27 @@ all three independent gates: `LIVE_TRADING_ENABLED=true`,
 `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`.
 
-The first production route is deliberately one-way: native Base ETH to the
-official Base USDC contract through a Coinbase CDP wallet provided by AgentKit.
-It is risk-reducing only and cannot create an ERC-20 approval. Absolute limits
-are hard-coded at $20 per intent, $100 of reservations per UTC day, $500 total
-trading capital, and 100 bps maximum slippage. A fresh, exact quote is bound to
-the approved wallet, Base chain ID 8453, token pair, input amount, notional, and
-slippage before any backend call.
+The production route is official Base USDC to a governed asset for buys and the
+same exact asset back to USDC for sells through a Coinbase CDP wallet provided
+by AgentKit. ERC-20 inputs use an exact-amount Permit2 approval; wrong spenders,
+tokens, amounts, or unlimited approvals are rejected. Absolute limits are
+hard-coded at $20 per intent, $100 of reservations per UTC day, $500 of
+authorized contributed trading capital, and 100 bps maximum slippage. Portfolio
+gains may take the wallet above $500, but the configured capital mandate cannot
+be raised. A fresh quote is bound to the wallet, Base chain ID 8453, exact token
+contracts and decimals, input amount, notional, and slippage before submission.
+
+`app.base_asset_universe_refresh` builds the eligible set from CoinGecko Base
+market-cap ordering cross-checked against GeckoTerminal contract metadata,
+liquidity, 24-hour volume, and pool age. It requires exactly 25 qualifying
+assets and writes the snapshot atomically. The research service can observe
+that watchlist, but its packets remain explicitly non-authoritative. The
+portfolio strategy independently validates the packet, current holdings, risk
+state, and universe before producing an audited intent.
+
+This is a long-only spot bot. In a falling market it can reduce exposure by
+selling governed assets to USDC, including stop-loss and take-profit exits. It
+cannot short, borrow, use leverage, or guarantee a profit from a correction.
 
 The live audit reserves daily capacity under a file lock before submission.
 Reservations survive backend failures and ambiguous timeouts so retries cannot
@@ -167,7 +184,8 @@ steps.
 ### Railway and CDP activation (remaining operator work)
 
 The main Docker image installs the pinned `coinbase-agentkit` production
-adapter. In Railway, mount a persistent volume at `/app/data`, then add
+adapter. In Railway, mount a persistent volume at `/app/data`, schedule a fresh
+governed-universe snapshot, then add
 `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, and `CDP_WALLET_SECRET` as service
 variables. Never paste those values into GitHub, logs, prompts, or committed
 files.
@@ -178,7 +196,9 @@ commit, durable journal writes, Base mainnet chain ID, and exact treasury
 address. Only after a separate no-funds review should an operator set
 `LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
 `TRADING_EXECUTOR_KILL_SWITCH=armed`. Funding and a first canary remain separate
-human actions; this pull request does not deploy, arm, fund, or trade.
+human actions; this pull request does not deploy, arm, fund, or trade. A
+verified CDP portfolio reader must also supply current balances and
+mark-to-market values; research packets are never wallet-balance evidence.
 
 ### Run the Paper Bot
 

@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
+from app.base_asset_universe import GovernedAssetUniverse
 from app.live_execution_journal import (
     DailyExecutionLimitError,
     LiveExecutionJournalError,
@@ -30,10 +31,11 @@ from app.trading_executor import (
 )
 
 
-ROUTE_ID = "cdp_agentkit_base_native_eth_to_usdc_v1"
+ROUTE_ID = "cdp_agentkit_base_governed_asset_usdc_v2"
 CDP_NETWORK_ID = "base-mainnet"
 CDP_SWAP_NETWORK = "base"
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+PERMIT2_ADDRESS = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 MAX_SLIPPAGE_BPS = 100
 TRANSACTION_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}")
 
@@ -56,6 +58,8 @@ class ApprovedSwap:
     from_token: str
     to_token: str
     from_amount: Decimal
+    from_decimals: int
+    to_decimals: int
     notional_usdc: Decimal
     slippage_bps: int
 
@@ -74,6 +78,9 @@ class SwapReceipt:
     min_to_amount: Decimal
     slippage_bps: int
     approval_transaction_hash: str | None = None
+    approval_token: str | None = None
+    approval_spender: str | None = None
+    approval_amount: Decimal | None = None
     error: str | None = None
 
 
@@ -102,6 +109,7 @@ def _validate_swap(
     now: datetime,
     max_age_seconds: int,
     max_future_skew_seconds: int,
+    asset_universe: GovernedAssetUniverse | None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     if not swap.quote_id.strip():
@@ -122,16 +130,41 @@ def _validate_swap(
         reasons.append("Swap wallet does not match the trade intent.")
     if swap.chain_id != BASE_MAINNET_CHAIN_ID or swap.chain_id != intent.chain_id:
         reasons.append("Swap chain must be Base mainnet chain ID 8453.")
-    if swap.from_token.strip().lower() != NATIVE_ETH_ADDRESS:
-        reasons.append("Approved route must sell native Base ETH.")
-    if swap.to_token.strip().lower() != BASE_USDC_ADDRESS:
-        reasons.append("Approved route must settle to official Base USDC.")
+    asset_token = (
+        intent.asset_token_address.strip().lower()
+        if intent.asset_token_address is not None
+        else NATIVE_ETH_ADDRESS
+    )
+    side = intent.side.strip().upper()
+    expected_from = BASE_USDC_ADDRESS if side == "BUY" else asset_token
+    expected_to = asset_token if side == "BUY" else BASE_USDC_ADDRESS
+    if swap.from_token.strip().lower() != expected_from:
+        reasons.append("Swap input token does not match the governed trade direction.")
+    if swap.to_token.strip().lower() != expected_to:
+        reasons.append("Swap output token does not match the governed trade direction.")
+    expected_asset_decimals = 18
+    if asset_universe is not None:
+        try:
+            expected_asset_decimals = asset_universe.require(
+                intent.asset_symbol,
+                intent.asset_token_address,
+            ).decimals
+        except ValueError:
+            reasons.append("Swap asset is outside the governed universe.")
+    expected_from_decimals = 6 if side == "BUY" else expected_asset_decimals
+    expected_to_decimals = expected_asset_decimals if side == "BUY" else 6
+    if swap.from_decimals != expected_from_decimals:
+        reasons.append("Swap input decimals do not match the governed asset metadata.")
+    if swap.to_decimals != expected_to_decimals:
+        reasons.append("Swap output decimals do not match the governed asset metadata.")
     if (
         not swap.from_amount.is_finite()
         or swap.from_amount <= 0
-        or swap.from_amount.as_tuple().exponent < -18
+        or swap.from_amount.as_tuple().exponent < -expected_from_decimals
     ):
-        reasons.append("Swap input amount must be finite and positive.")
+        reasons.append("Swap input amount is invalid for the governed token decimals.")
+    if side == "BUY" and swap.from_amount != intent.notional_usdc:
+        reasons.append("A buy must spend exactly the approved USDC notional.")
     if swap.notional_usdc != intent.notional_usdc:
         reasons.append("Swap notional must exactly match the trade intent.")
     if type(swap.slippage_bps) is not int or not 0 <= swap.slippage_bps <= MAX_SLIPPAGE_BPS:
@@ -170,8 +203,10 @@ def _validate_receipt(
         or receipt.to_amount <= 0
         or receipt.min_to_amount <= 0
         or receipt.to_amount < receipt.min_to_amount
-        or receipt.to_amount > request.notional_usdc
-        or receipt.to_amount > MAX_TRADE_NOTIONAL_USDC
+        or (
+            request.to_token.strip().lower() == BASE_USDC_ADDRESS
+            and receipt.to_amount > request.notional_usdc
+        )
     ):
         reasons.append("CDP receipt output amounts are invalid.")
     elif (
@@ -181,8 +216,33 @@ def _validate_receipt(
         > request.slippage_bps
     ):
         reasons.append("CDP receipt minimum output exceeds approved slippage.")
-    if receipt.approval_transaction_hash is not None:
-        reasons.append("The native-ETH route must not create an approval transaction.")
+    approval_values = (
+        receipt.approval_transaction_hash,
+        receipt.approval_token,
+        receipt.approval_spender,
+        receipt.approval_amount,
+    )
+    native_input = request.from_token.strip().lower() == NATIVE_ETH_ADDRESS
+    if native_input and any(value is not None for value in approval_values):
+        reasons.append("Native ETH must not create an approval transaction.")
+    elif not native_input and any(value is not None for value in approval_values):
+        if not all(value is not None for value in approval_values):
+            reasons.append("ERC-20 approval evidence is incomplete.")
+        else:
+            assert receipt.approval_transaction_hash is not None
+            assert receipt.approval_token is not None
+            assert receipt.approval_spender is not None
+            assert receipt.approval_amount is not None
+            if not TRANSACTION_HASH_PATTERN.fullmatch(
+                receipt.approval_transaction_hash
+            ):
+                reasons.append("ERC-20 approval transaction hash is invalid.")
+            if receipt.approval_token.strip().lower() != request.from_token.strip().lower():
+                reasons.append("ERC-20 approval token does not match the swap input.")
+            if receipt.approval_spender.strip().lower() != PERMIT2_ADDRESS:
+                reasons.append("ERC-20 approval spender is not Permit2.")
+            if receipt.approval_amount != request.from_amount:
+                reasons.append("ERC-20 approval must equal the exact swap amount.")
     return tuple(reasons)
 
 
@@ -197,6 +257,7 @@ def execute_controlled_live_trade(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    asset_universe: GovernedAssetUniverse | None = None,
 ) -> ControlledLiveResult:
     from app.execution_journal import (
         JournalIntegrityError,
@@ -210,6 +271,7 @@ def execute_controlled_live_trade(
         now=current_time,
         live_config=live_config,
         executor_config=executor_config,
+        asset_universe=asset_universe,
     )
     try:
         recorded = append_execution_decision(
@@ -245,6 +307,7 @@ def execute_controlled_live_trade(
         now=current_time,
         max_age_seconds=freshness_config.max_data_age_seconds,
         max_future_skew_seconds=freshness_config.max_future_skew_seconds,
+        asset_universe=asset_universe,
     )
     if swap_reasons:
         return ControlledLiveResult(
@@ -265,6 +328,8 @@ def execute_controlled_live_trade(
             from_token=swap.from_token,
             to_token=swap.to_token,
             from_amount=swap.from_amount,
+            from_decimals=swap.from_decimals,
+            to_decimals=swap.to_decimals,
             slippage_bps=swap.slippage_bps,
             path=live_audit_path,
             recorded_at=current_time,
@@ -325,6 +390,8 @@ def execute_controlled_live_trade(
         "to_amount": str(receipt.to_amount),
         "min_to_amount": str(receipt.min_to_amount),
     })
+    if receipt.approval_amount is not None:
+        details["approval_amount"] = str(receipt.approval_amount)
     details["backend_error_reported"] = receipt.error is not None
     details.pop("error", None)
     if receipt_reasons:
@@ -355,7 +422,7 @@ def execute_controlled_live_trade(
 
 
 class CdpAgentKitBackend:
-    """Production adapter for one native ETH -> USDC CDP swap route.
+    """Production adapter for governed Base asset <-> USDC spot routes.
 
     AgentKit supplies the CDP EVM wallet provider and credential isolation. The
     adapter uses the provider's CDP client directly so the requested slippage
@@ -397,8 +464,57 @@ class CdpAgentKitBackend:
     def submit_swap(self, request: ApprovedSwap) -> SwapReceipt:
         if request.route_id != ROUTE_ID:
             raise ValueError("CDP backend received an unapproved route.")
+
+        atomic_value = request.from_amount * Decimal(10**request.from_decimals)
+        if atomic_value != atomic_value.to_integral_value() or atomic_value <= 0:
+            raise ValueError("CDP backend received an invalid atomic input amount.")
+        atomic_input = int(atomic_value)
+        approval_transaction_hash: str | None = None
+
         if request.from_token.lower() != NATIVE_ETH_ADDRESS:
-            raise ValueError("CDP backend accepts native ETH input only.")
+            allowance_abi = [
+                {
+                    "constant": True,
+                    "inputs": [
+                        {"name": "owner", "type": "address"},
+                        {"name": "spender", "type": "address"},
+                    ],
+                    "name": "allowance",
+                    "outputs": [{"name": "", "type": "uint256"}],
+                    "type": "function",
+                }
+            ]
+            current_allowance = int(
+                self._wallet.read_contract(
+                    contract_address=request.from_token,
+                    abi=allowance_abi,
+                    function_name="allowance",
+                    args=[self._wallet.get_address(), PERMIT2_ADDRESS],
+                )
+            )
+            if current_allowance != atomic_input:
+                spender_word = PERMIT2_ADDRESS[2:].rjust(64, "0")
+                amount_word = f"{atomic_input:064x}"
+                approval_data = f"0x095ea7b3{spender_word}{amount_word}"
+                approval_transaction_hash = str(
+                    self._wallet.send_transaction(
+                        {
+                            "to": request.from_token,
+                            "value": 0,
+                            "data": approval_data,
+                        }
+                    )
+                )
+                approval_receipt = self._wallet.wait_for_transaction_receipt(
+                    approval_transaction_hash
+                )
+                approval_status = (
+                    approval_receipt.get("status")
+                    if isinstance(approval_receipt, dict)
+                    else getattr(approval_receipt, "status", None)
+                )
+                if str(approval_status).lower() not in {"1", "success"}:
+                    raise RuntimeError("Exact Permit2 approval transaction failed.")
 
         async def execute_quote() -> tuple[str, str, Decimal, Decimal]:
             client = self._wallet.get_client()
@@ -406,13 +522,10 @@ class CdpAgentKitBackend:
                 account = await cdp.evm.get_account(
                     address=self._wallet.get_address()
                 )
-                atomic_input = str(
-                    int(request.from_amount * Decimal(10**18))
-                )
                 quote = await account.quote_swap(
                     from_token=request.from_token,
                     to_token=request.to_token,
-                    from_amount=atomic_input,
+                    from_amount=str(atomic_input),
                     network=CDP_SWAP_NETWORK,
                     slippage_bps=request.slippage_bps,
                     idempotency_key=str(
@@ -424,16 +537,22 @@ class CdpAgentKitBackend:
                 )
                 if not quote.liquidity_available:
                     raise RuntimeError("CDP reported no liquidity for the approved route.")
-                quoted_usdc = Decimal(str(quote.to_amount)) / Decimal(10**6)
-                minimum_usdc = Decimal(str(quote.min_to_amount)) / Decimal(10**6)
+                output_scale = Decimal(10**request.to_decimals)
+                quoted_output = Decimal(str(quote.to_amount)) / output_scale
+                minimum_output = Decimal(str(quote.min_to_amount)) / output_scale
                 if (
-                    not quoted_usdc.is_finite()
-                    or not minimum_usdc.is_finite()
-                    or quoted_usdc <= 0
-                    or minimum_usdc <= 0
-                    or quoted_usdc < minimum_usdc
-                    or quoted_usdc > request.notional_usdc
-                    or quoted_usdc > MAX_TRADE_NOTIONAL_USDC
+                    not quoted_output.is_finite()
+                    or not minimum_output.is_finite()
+                    or quoted_output <= 0
+                    or minimum_output <= 0
+                    or quoted_output < minimum_output
+                    or (
+                        request.to_token.lower() == BASE_USDC_ADDRESS
+                        and (
+                            quoted_output > request.notional_usdc
+                            or quoted_output > MAX_TRADE_NOTIONAL_USDC
+                        )
+                    )
                 ):
                     raise RuntimeError(
                         "CDP quote violates the approved output/notional boundary."
@@ -450,15 +569,20 @@ class CdpAgentKitBackend:
                 return (
                     transaction_hash,
                     str(quote.quote_id),
-                    quoted_usdc,
-                    minimum_usdc,
+                    quoted_output,
+                    minimum_output,
                 )
 
-        transaction_hash, quote_id, quoted_usdc, minimum_usdc = self._run(
+        transaction_hash, quote_id, quoted_output, minimum_output = self._run(
             execute_quote()
         )
         chain_receipt = self._wallet.wait_for_transaction_receipt(transaction_hash)
-        success = str(chain_receipt.status).lower() in {"1", "success"}
+        chain_status = (
+            chain_receipt.get("status")
+            if isinstance(chain_receipt, dict)
+            else getattr(chain_receipt, "status", None)
+        )
+        success = str(chain_status).lower() in {"1", "success"}
         return SwapReceipt(
             success=success,
             transaction_hash=transaction_hash,
@@ -468,8 +592,18 @@ class CdpAgentKitBackend:
             from_token=request.from_token,
             to_token=request.to_token,
             from_amount=request.from_amount,
-            to_amount=quoted_usdc,
-            min_to_amount=minimum_usdc,
+            to_amount=quoted_output,
+            min_to_amount=minimum_output,
             slippage_bps=request.slippage_bps,
+            approval_transaction_hash=approval_transaction_hash,
+            approval_token=(
+                request.from_token if approval_transaction_hash is not None else None
+            ),
+            approval_spender=(
+                PERMIT2_ADDRESS if approval_transaction_hash is not None else None
+            ),
+            approval_amount=(
+                request.from_amount if approval_transaction_hash is not None else None
+            ),
             error=None if success else "CDP swap transaction reverted.",
         )

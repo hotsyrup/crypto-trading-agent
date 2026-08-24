@@ -129,6 +129,8 @@ def reserve_live_execution(
     from_token: str,
     to_token: str,
     from_amount: Decimal,
+    from_decimals: int,
+    to_decimals: int,
     slippage_bps: int,
     path: Path = LIVE_EXECUTION_JOURNAL_PATH,
     recorded_at: datetime | None = None,
@@ -144,6 +146,10 @@ def reserve_live_execution(
     quote_timestamp = _aware_utc(quote_observed_at)
     requested = _decimal(notional_usdc, "Reservation notional")
     requested_input = _decimal(from_amount, "Reservation input amount")
+    if type(from_decimals) is not int or not 0 <= from_decimals <= 36:
+        raise LiveExecutionJournalError("Input token decimals are invalid.")
+    if type(to_decimals) is not int or not 0 <= to_decimals <= 36:
+        raise LiveExecutionJournalError("Output token decimals are invalid.")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -201,6 +207,8 @@ def reserve_live_execution(
                     "from_token": from_token,
                     "to_token": to_token,
                     "from_amount": str(requested_input),
+                    "from_decimals": from_decimals,
+                    "to_decimals": to_decimals,
                     "slippage_bps": slippage_bps,
                 },
             )

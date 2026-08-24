@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.base_asset_universe import GovernedAssetUniverse
 from app.live_trading_config import BASE_USDC_ADDRESS, LiveTradingConfig
 
 
@@ -17,6 +18,7 @@ def evaluate_asset_identity(
     token_address: str | None,
     unsolicited: bool,
     config: LiveTradingConfig,
+    universe: GovernedAssetUniverse | None = None,
 ) -> AssetPolicyDecision:
     """Fail closed unless an asset matches the mandate's exact identity.
 
@@ -33,6 +35,31 @@ def evaluate_asset_identity(
             allowed=False,
             reason="Unsolicited assets are never eligible for trading.",
         )
+
+    if universe is not None:
+        if normalized_symbol == "USDC":
+            if normalized_address != BASE_USDC_ADDRESS:
+                return AssetPolicyDecision(
+                    allowed=False,
+                    reason="USDC contract does not match the official Base contract.",
+                )
+            return AssetPolicyDecision(
+                allowed=True,
+                reason="USDC matches the official Base settlement contract.",
+            )
+        if universe.contains(normalized_symbol, normalized_address):
+            return AssetPolicyDecision(
+                allowed=True,
+                reason="Asset matches the governed top-25 Base universe.",
+            )
+        return AssetPolicyDecision(
+            allowed=False,
+            reason=(
+                "Asset symbol and exact contract are outside the governed "
+                "top-25 Base universe."
+            ),
+        )
+
     if normalized_symbol not in config.approved_assets:
         return AssetPolicyDecision(
             allowed=False,
