@@ -183,14 +183,14 @@ def _get_json(url: str) -> object:
     if parsed.hostname == GECKOTERMINAL_HOST:
         headers["Accept"] = "application/json;version=20230203"
     request = Request(url, headers=headers)
-    for attempt in range(2):
+    for attempt in range(5):
         try:
             with urlopen(request, timeout=20) as response:  # nosec B310
                 return json.load(response)
         except HTTPError as error:
-            if error.code != 429 or attempt == 1:
+            if error.code != 429 or attempt == 4:
                 raise
-            time.sleep(GECKOTERMINAL_REQUEST_INTERVAL_SECONDS)
+            time.sleep(GECKOTERMINAL_REQUEST_INTERVAL_SECONDS * (attempt + 1))
     raise RuntimeError("Market-data request retry loop ended unexpectedly.")
 
 

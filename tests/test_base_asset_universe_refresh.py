@@ -1,7 +1,10 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from urllib.error import HTTPError
+from unittest.mock import patch
 
-from app.base_asset_universe_refresh import build_cross_verified_snapshot
+from app.base_asset_universe_refresh import _get_json, build_cross_verified_snapshot
 
 
 NOW = datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc)
@@ -9,6 +12,24 @@ WETH = "0x4200000000000000000000000000000000000006"
 
 
 class AssetUniverseRefreshTests(unittest.TestCase):
+    @patch("app.base_asset_universe_refresh.time.sleep")
+    @patch("app.base_asset_universe_refresh.urlopen")
+    def test_rate_limit_retries_until_provider_recovers(self, urlopen, sleep) -> None:
+        response = BytesIO(b'{"data": []}')
+        urlopen.side_effect = [
+            HTTPError("https://api.geckoterminal.com/test", 429, "busy", {}, None),
+            HTTPError("https://api.geckoterminal.com/test", 429, "busy", {}, None),
+            response,
+        ]
+
+        payload = _get_json(
+            "https://api.geckoterminal.com/api/v2/networks/base/tokens/test"
+        )
+
+        self.assertEqual(payload, {"data": []})
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_market_cap_rank_is_cross_checked_against_onchain_liquidity_and_age(self) -> None:
         markets = []
         coins = []
