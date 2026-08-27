@@ -179,17 +179,21 @@ class ResearchAgentTests(unittest.TestCase):
                 clear=True,
             ):
                 *_, watchlist = load_config()
-        self.assertEqual(len(watchlist), 25)
+        self.assertEqual(len(watchlist), 26)
         self.assertEqual(watchlist[0], "0x4200000000000000000000000000000000000006")
         self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
+        self.assertEqual(watchlist[-1], "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
 
     @patch("app.research_agent.get_json")
-    def test_fetch_pairs_batches_all_candidates_in_one_provider_request(self, get_json) -> None:
-        get_json.return_value = [sample_pair("100"), sample_pair("200")]
+    def test_fetch_pairs_queries_each_contract_to_avoid_provider_truncation(self, get_json) -> None:
+        get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
         second = "0x0000000000000000000000000000000000000002"
         pairs = fetch_pairs([ADDRESS, second])
         self.assertEqual(len(pairs), 2)
-        get_json.assert_called_once_with(f"/tokens/v1/base/{ADDRESS},{second}")
+        self.assertEqual(
+            [call.args[0] for call in get_json.call_args_list],
+            [f"/tokens/v1/base/{ADDRESS}", f"/tokens/v1/base/{second}"],
+        )
 
     @patch("app.research_agent.store_packets")
     @patch("app.research_agent.fetch_pairs")
@@ -209,7 +213,7 @@ class ResearchAgentTests(unittest.TestCase):
         utc_now.side_effect = [started_at, completed_at]
         load_config_mock.return_value = (
             300,
-            1,
+            25,
             Decimal("50000"),
             5,
             Path("unused.sqlite3"),
@@ -228,6 +232,7 @@ class ResearchAgentTests(unittest.TestCase):
         store_mock.return_value = 1
 
         self.assertEqual(run_research_cycle(), 1)
+        discover_mock.assert_called_once_with(1, (ADDRESS,))
 
         packet = store_mock.call_args.args[1][0]
         self.assertEqual(packet["received_at"], completed_at.isoformat())
@@ -274,6 +279,70 @@ class ResearchAgentTests(unittest.TestCase):
         incomplete = sample_pair("999999")
         incomplete["pairCreatedAt"] = None
         self.assertEqual(eligible_base_pairs(ADDRESS, [complete, incomplete]), [complete])
+
+    def test_official_usdc_pool_can_omit_stablecoin_change_metrics(self) -> None:
+        usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        usdbc = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+        pair = sample_pair()
+        pair["baseToken"] = {"address": usdc, "name": "USD Coin", "symbol": "USDC"}
+        pair["quoteToken"] = {"address": usdbc, "name": "USD Base Coin", "symbol": "USDbC"}
+        pair["priceUsd"] = "1.00012"
+        pair["priceChange"] = {}
+
+        eligible = eligible_base_pairs(usdc, [pair], {usdbc})
+        packet = build_packet(
+            {
+                "contract_address": usdc,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            eligible[0],
+            datetime(2026, 8, 27, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+            len(eligible),
+        )
+
+        self.assertEqual(packet["symbol"], "USDC")
+        self.assertEqual(packet["data_quality"], "partial")
+        self.assertIn("MARKET_FIELDS_INCOMPLETE", packet["warnings"])
+        self.assertIsNone(packet["metrics"]["price_change_h24_percent"])
+        self.assertIsNone(packet["metrics"]["price_change_h6_percent"])
+
+    def test_governed_pool_age_fills_missing_provider_timestamp(self) -> None:
+        pair = sample_pair()
+        pair["pairCreatedAt"] = None
+        fallback = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+        eligible = eligible_base_pairs(
+            ADDRESS,
+            [pair],
+            pair_created_at_fallback=fallback,
+        )
+        packet = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+                "pair_created_at_fallback": fallback,
+            },
+            eligible[0],
+            datetime(2026, 8, 27, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+            len(eligible),
+        )
+
+        self.assertEqual(packet["data_quality"], "complete")
+        self.assertEqual(packet["metrics"]["pair_created_at"], fallback.isoformat())
+        self.assertEqual(
+            packet["source"]["pair_created_at_provider"],
+            "geckoterminal_governed_universe",
+        )
 
     def test_packet_is_expiring_observation_not_execution(self) -> None:
         now = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)

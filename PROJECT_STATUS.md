@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-27_
 
 ## Mission
 
@@ -8,16 +8,18 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** funded CDP wallet and live path verified through a fail-closed canary
+**Overall:** corrected Base worker deployed, verified, and armed
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
-- Live trading: **currently halted after the first fail-closed canary**
-- Unattended live execution: **implemented; corrected canary retry requires explicit approval**
+- Live trading: **armed under the existing hard limits**
+- Unattended live execution: **active for the exact dedicated CDP wallet**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
-- Runtime treasury: 25 USDC in the dedicated CDP wallet; signing credentials remain deployment-only
+- Runtime treasury after the first rearmed cycle: 50.331139 USDC plus governed
+  Base assets in the dedicated CDP wallet; signing credentials remain
+  deployment-only
 
 ## What Works Today
 
@@ -97,18 +99,26 @@ Railway has a healthy persistent volume mounted at `/app/data` and now stores
 variables; credentials remain outside GitHub. Coinbase created the dedicated
 `lumen-trading-agent` API-key wallet at
 `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`. The execution and research
-workers refresh their own exact-25 snapshots before using them. Research
-deployment `f4a6d487-1a4e-437a-a247-4fee1789f6f7` stored all 25 governed packets.
-The trading worker verified 25 USDC in the exact treasury on `base-mainnet`,
-chain ID 8453. The first $1.25 canary was reserved, failed at the AgentKit
-address boundary, and was audit-recorded as `BACKEND_FAILED`; no confirmed
-swap receipt exists. Deployment `b3524e5a-8d26-46d0-8deb-4654bf8a2cb2`
-contains the tested checksum correction and is currently shadow-only with the
-kill switch halted. A retry requires setting all three gates deliberately:
-`LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
-`TRADING_EXECUTOR_KILL_SWITCH=armed`.
+workers use the exact-25 governed snapshot, while the observation-only research
+service also emits the required official USDC identity packet. Research
+deployment `bdd69396-98d7-40b4-ba40-85775687ad7` reached `SUCCESS` with 26
+fresh stored packets per cycle. Worker deployment
+`eb1032e1-911f-45d4-a630-e490a8c9e62e` was verified while all execution gates
+were halted; armed redeployment `ece14685-d2e7-4b60-a503-e6a6758081a1`
+reached `SUCCESS`.
 
-Do not retry the real-money canary without explicit approval for that action.
+The first armed cycle used 5.260705 USDC to purchase
+129.402901872644870541 CHIP. Base confirmed approval transaction
+`0x9828966679911b35ec0d6bbb0131d34e8a9934254b3b4fed2f453febc640b629`
+and swap transaction
+`0x09c0de4d08bdeb7c7bba5535e8f2299dcafed21ade0e51709a070743ec252c91`.
+Independent Base RPC then reported 50.331139 official USDC and
+129.40301232553952 CHIP in the exact wallet.
+
+Through 2026-08-27 15:01 UTC, six confirmed cycles had spent 21.278888 USDC
+for 522.984386248333337919 CHIP. Every approval and swap receipt returned Base
+status 1. The read-only wallet snapshot then showed 34.312956 USDC,
+522.984496701227983292 CHIP, and 0.001913206172781036 ETH.
 
 ## Wallet Roles
 
@@ -132,10 +142,12 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Validate the top-25 research feed, then obtain approval for a small canary.**
+**Monitor armed execution receipts, balances, and journal integrity.**
 
-The no-funds exact-wallet/network check is complete. The immediate focus is
-top-25 research-feed verification and one separately approved small canary.
+The exact wallet, Base network, fresh research coverage for every held governed
+asset, and all three production hash chains were verified before rearm. Preserve
+the unresolved 3.745010-USDC reservation from 2026-08-24 as charged and never
+retry it automatically.
 
 ## Project Dashboard Roadmap
 
