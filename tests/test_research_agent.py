@@ -11,8 +11,10 @@ from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from app.research_agent import (
+    _build_contract_packets,
     build_packet,
     discover_base_contracts,
+    ensure_required_contract_packets,
     eligible_base_pairs,
     fetch_pairs,
     get_json,
@@ -21,6 +23,7 @@ from app.research_agent import (
     main,
     public_health_state,
     public_route_response,
+    required_contracts_from_path,
     run_research_cycle,
     select_primary_pair,
     store_packets,
@@ -458,6 +461,78 @@ class ResearchAgentTests(unittest.TestCase):
             path = Path(directory) / "missing.sqlite3"
             self.assertEqual(load_latest_packets(path), [])
             self.assertFalse(path.exists())
+
+    def test_exact_contract_coverage_refreshes_stale_held_asset(self) -> None:
+        stale = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            5,
+        )
+        fresh = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.sqlite3"
+            store_packets(path, [stale])
+            config = (60, 25, Decimal("50000"), 5, path, (ADDRESS,))
+            with (
+                patch("app.research_agent.load_config", return_value=config),
+                patch(
+                    "app.research_agent._build_contract_packets",
+                    return_value=[fresh],
+                ) as refresh,
+            ):
+                packets = ensure_required_contract_packets(
+                    (ADDRESS,),
+                    now=datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+                )
+
+        refresh.assert_called_once_with(
+            (ADDRESS,), minimum_liquidity=Decimal("50000"), freshness=5
+        )
+        self.assertEqual(packets[0]["packet_id"], fresh["packet_id"])
+        self.assertFalse(packets[0]["is_stale"])
+
+    def test_required_contract_query_is_exact_and_bounded(self) -> None:
+        path = f"/research/crypto/base/latest?required_contracts={ADDRESS}"
+        self.assertEqual(required_contracts_from_path(path), (ADDRESS,))
+        with self.assertRaisesRegex(ValueError, "invalid contract"):
+            required_contracts_from_path(
+                "/research/crypto/base/latest?required_contracts=MAG7.SSI"
+            )
+
+    def test_exact_contract_refresh_batches_without_provider_truncation(self) -> None:
+        contracts = tuple(f"0x{number:040x}" for number in range(1, 32))
+        with patch("app.research_agent.fetch_pairs", return_value=[]) as fetch:
+            packets = _build_contract_packets(
+                contracts,
+                minimum_liquidity=Decimal("50000"),
+                freshness=5,
+            )
+
+        self.assertEqual([len(call.args[0]) for call in fetch.call_args_list], [30, 1])
+        self.assertEqual(
+            tuple(packet["contract_address"] for packet in packets),
+            contracts,
+        )
 
     def test_public_health_exposes_provider_and_execution_boundaries(self) -> None:
         health = public_health_state()

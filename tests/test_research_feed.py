@@ -1,6 +1,9 @@
+import json
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from unittest.mock import patch
 
 from app.research_feed import (
     APPROVED_QUOTE_CONTRACTS,
@@ -9,6 +12,7 @@ from app.research_feed import (
     WETH_CONTRACT,
     _packet_digest,
     evaluate_research_payload,
+    get_research_payload,
 )
 
 
@@ -86,6 +90,23 @@ class ResearchFeedTests(unittest.TestCase):
         )
         change(packet)
         packet["packet_id"] = _packet_digest(packet)
+
+    @patch("app.research_feed.urlopen")
+    def test_exact_required_contracts_are_sent_without_wallet_context(self, urlopen):
+        response = BytesIO(json.dumps(self.payload()).encode())
+        response.headers = {}
+        urlopen.return_value = response
+
+        get_research_payload((WETH_CONTRACT, USDC_CONTRACT))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://lumen-base-research-agent-production.up.railway.app"
+            "/research/crypto/base/latest?required_contracts="
+            f"{WETH_CONTRACT}%2C{USDC_CONTRACT}",
+        )
+        self.assertNotIn("wallet", request.full_url)
 
     def test_fresh_complete_authenticated_packets_pass(self):
         decision = evaluate_research_payload(self.payload(), now=self.now)

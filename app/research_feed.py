@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -286,14 +286,32 @@ def _validate_packet(
     return packet_id, received_at
 
 
-def get_research_payload() -> object:
+def get_research_payload(required_contracts: tuple[str, ...] = ()) -> object:
     url = os.getenv("RESEARCH_FEED_URL", DEFAULT_RESEARCH_URL).strip()
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_HOST:
         raise ValueError("Research feed must use the approved Railway HTTPS host.")
     if parsed.path != BASE_RESEARCH_PATH or parsed.query or parsed.fragment:
         raise ValueError(f"Research feed path must be {BASE_RESEARCH_PATH}.")
-    request = Request(url, headers={"User-Agent": "lumen-trading-monitor/2"})
+    if len(required_contracts) > 50:
+        raise ValueError("Research coverage cannot exceed 50 exact contracts.")
+    normalized = tuple(
+        dict.fromkeys(contract.strip().lower() for contract in required_contracts)
+    )
+    if any(
+        len(contract) != 42
+        or not contract.startswith("0x")
+        or any(character not in "0123456789abcdef" for character in contract[2:])
+        for contract in normalized
+    ):
+        raise ValueError("Research coverage contains an invalid Base contract.")
+    request_url = url
+    if normalized:
+        request_url = f"{url}?{urlencode({'required_contracts': ','.join(normalized)})}"
+    request = Request(
+        request_url,
+        headers={"User-Agent": "lumen-trading-monitor/2"},
+    )
     with urlopen(request, timeout=10) as response:  # nosec B310
         return json.load(response)
 

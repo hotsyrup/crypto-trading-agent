@@ -87,10 +87,11 @@ class VerifiedPortfolio:
     positions: tuple[PortfolioPosition, ...]
 
 
-def research_signal_from_packet(
+def _research_signal_from_packet(
     packet: object,
-    universe: GovernedAssetUniverse,
+    universe: GovernedAssetUniverse | None,
     *,
+    required_contract: str | None = None,
     now: datetime | None = None,
 ) -> ResearchSignal:
     """Normalize one observation-only packet without granting it authority."""
@@ -138,15 +139,23 @@ def research_signal_from_packet(
 
     contract = str(packet.get("contract_address", "")).lower()
     symbol = str(packet.get("symbol", "")).upper()
-    matched_asset = None
-    for asset in universe.assets:
-        expected_contract = asset.token_address or WETH_ADDRESS
-        expected_symbol = "WETH" if asset.token_address is None else asset.symbol
-        if contract == expected_contract and symbol == expected_symbol:
-            matched_asset = asset
-            break
-    if matched_asset is None:
-        raise ValueError("Research token is outside the governed universe.")
+    matched_symbol = None
+    matched_address = None
+    if universe is not None:
+        for asset in universe.assets:
+            expected_contract = asset.token_address or WETH_ADDRESS
+            expected_symbol = "WETH" if asset.token_address is None else asset.symbol
+            if contract == expected_contract and symbol == expected_symbol:
+                matched_symbol = asset.symbol
+                matched_address = asset.token_address
+                break
+    elif required_contract is not None and contract == required_contract.lower():
+        if not symbol or len(symbol) > 20:
+            raise ValueError("Research token symbol is invalid.")
+        matched_symbol = symbol
+        matched_address = contract
+    if matched_symbol is None:
+        raise ValueError("Research token is outside the governed exact-contract set.")
     warnings = packet.get("warnings")
     if (
         not isinstance(warnings, list)
@@ -195,8 +204,8 @@ def research_signal_from_packet(
     return ResearchSignal(
         packet_id=packet_id,
         observed_at=observed_at,
-        symbol=matched_asset.symbol,
-        token_address=matched_asset.token_address,
+        symbol=matched_symbol,
+        token_address=matched_address,
         price_usd=values["price"],
         liquidity_usd=values["liquidity"],
         daily_volume_usd=values["volume"],
@@ -204,6 +213,33 @@ def research_signal_from_packet(
         change_h24_percent=values["change_h24"],
         buys_h24=buys,
         sells_h24=sells,
+    )
+
+
+def research_signal_from_packet(
+    packet: object,
+    universe: GovernedAssetUniverse,
+    *,
+    now: datetime | None = None,
+) -> ResearchSignal:
+    """Normalize a current-candidate packet through the governed universe."""
+
+    return _research_signal_from_packet(packet, universe, now=now)
+
+
+def valuation_signal_from_packet(
+    packet: object,
+    token_address: str,
+    *,
+    now: datetime | None = None,
+) -> ResearchSignal:
+    """Normalize valuation-only evidence for a retained exact contract."""
+
+    return _research_signal_from_packet(
+        packet,
+        None,
+        required_contract=token_address,
+        now=now,
     )
 
 
