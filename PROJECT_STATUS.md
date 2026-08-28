@@ -8,15 +8,15 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** Agent Commerce deployed disabled; Base worker halted by a
-pre-existing valuation-health failure
+**Overall:** Base worker operational with trading readiness blocked; retained
+holdings are valued by exact contract and unsolicited holdings are quarantined
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
 - Live trading: **halted**
-- Unattended live execution: **inactive pending a healthy production cycle**
+- Unattended live execution: **inactive; production remains financially inert**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
 - Runtime treasury after the first rearmed cycle: 50.331139 USDC plus governed
   Base assets in the dedicated CDP wallet; signing credentials remain
@@ -52,6 +52,12 @@ pre-existing valuation-health failure
   per normalized asset per rolling 24h
 - Persist paid-research reservations and candidate evaluations in a locked,
   fsynced, hash-chained journal, with no automatic retry after ambiguity
+- Persist an exact-contract asset lifecycle registry that separates current
+  candidates, retained governed holdings, and quarantined unsolicited assets
+- Expand observation-only research coverage on demand for required held
+  contracts without exposing wallet context or granting execution authority
+- Report process liveness separately from trading readiness, so a conservative
+  valuation or quarantine block remains visible without crashing the worker
 
 ## Live Trading Guardrails Adopted
 
@@ -122,6 +128,25 @@ signal. Live execution therefore remains explicitly halted and the Agent
 Commerce mode remains `disabled`; no shadow request, signature, report
 purchase, or trade occurred.
 
+Later on 2026-08-28, research deployment
+`8852faf8-1459-42b5-b31d-2ad8020e536f` and canonical worker deployment
+`2c5252ef-86c2-436e-902f-f20dbe93a19c` reached terminal `SUCCESS`. The proven
+failure class was candidate-set turnover across independently refreshed
+exact-25 snapshots: a governed holding could fall out of discovery and then
+disappear from fresh valuation coverage. The repair persists held governance by
+exact contract, requests retained coverage independently of candidates, reuses
+previously evidenced pool age when the provider omits it, and separates
+valuation acceptance from new-entry liquidity policy.
+
+Six consecutive production cycles from 20:38:47 through 20:43:57 UTC completed
+with HTTP 200, `held_covered=8`, `held_required=8`, zero failure events, and no
+submission. Twenty-five unsolicited exact-contract holdings were conservatively
+quarantined, so `trading_readiness=blocked` remains explicit. The decision,
+live-execution, and risk journals validated at their unchanged pre-deploy counts
+of 1779, 123, and 3995 entries; the unresolved reservation remains preserved.
+Production remained `LIVE_TRADING_ENABLED=false`, `shadow_only`, kill switch
+`halted`, and Agent Commerce `disabled` throughout.
+
 The first armed cycle used 5.260705 USDC to purchase
 129.402901872644870541 CHIP. Base confirmed approval transaction
 `0x9828966679911b35ec0d6bbb0131d34e8a9934254b3b4fed2f453febc640b629`
@@ -157,9 +182,9 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Restore fresh valuation coverage for held governed `MAG7.SSI`, verify a
-healthy worker cycle, and only then complete a non-spending Agent Commerce
-shadow cycle before considering activation.**
+**Review and classify the 25 quarantined unsolicited holdings. Keep execution
+halted; any Agent Commerce shadow-cycle or trading activation remains a separate
+explicit decision.**
 
 The exact wallet, Base network, fresh research coverage for every held governed
 asset, and all three production hash chains were verified before rearm. Preserve
