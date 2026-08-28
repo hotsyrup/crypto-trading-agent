@@ -8,14 +8,15 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** corrected Base worker deployed, verified, and armed
+**Overall:** Agent Commerce deployed disabled; Base worker halted by a
+pre-existing valuation-health failure
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
-- Live trading: **armed under the existing hard limits**
-- Unattended live execution: **active for the exact dedicated CDP wallet**
+- Live trading: **halted**
+- Unattended live execution: **inactive pending a healthy production cycle**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
 - Runtime treasury after the first rearmed cycle: 50.331139 USDC plus governed
   Base assets in the dedicated CDP wallet; signing credentials remain
@@ -113,6 +114,14 @@ fresh stored packets per cycle. Worker deployment
 were halted; armed redeployment `ece14685-d2e7-4b60-a503-e6a6758081a1`
 reached `SUCCESS`.
 
+On 2026-08-28, canonical worker deployment
+`47bc7c2e-0fc3-4cb0-9d2a-1da1ec65ffde` reached `SUCCESS` with the Agent
+Commerce gate disabled. The runtime health check then failed before candidate
+selection because the held governed `MAG7.SSI` balance had no fresh valuation
+signal. Live execution therefore remains explicitly halted and the Agent
+Commerce mode remains `disabled`; no shadow request, signature, report
+purchase, or trade occurred.
+
 The first armed cycle used 5.260705 USDC to purchase
 129.402901872644870541 CHIP. Base confirmed approval transaction
 `0x9828966679911b35ec0d6bbb0131d34e8a9934254b3b4fed2f453febc640b629`
@@ -148,8 +157,9 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Deploy and verify Agent Commerce research while its feature flag remains
-disabled, then complete a non-spending shadow cycle before any activation.**
+**Restore fresh valuation coverage for held governed `MAG7.SSI`, verify a
+healthy worker cycle, and only then complete a non-spending Agent Commerce
+shadow cycle before considering activation.**
 
 The exact wallet, Base network, fresh research coverage for every held governed
 asset, and all three production hash chains were verified before rearm. Preserve

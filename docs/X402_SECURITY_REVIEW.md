@@ -13,9 +13,10 @@ hard-coded Agent Commerce research product documented in
 arbitrary recipient, alternate token, alternate network, dynamic amount,
 Permit2, batch, `upto`, or model-directed payment capability was added.
 
-The code is ready for a disabled production deployment and a non-spending
-shadow verification. Enforced purchasing is not ready until the recorded
-deployment, health, wallet, and shadow gates pass.
+The code was deployed to the confirmed production worker with the feature
+disabled. Enforced purchasing is not ready: the worker's pre-candidate
+portfolio verification is unhealthy, so the health and non-spending shadow
+gates did not pass.
 
 ## Implemented controls
 
@@ -69,14 +70,22 @@ malformed and stale reports, pre-signing unavailability, ambiguous settlement
 without repayment, tamper-evident audit persistence, and proof that favorable
 research cannot bypass the existing executor halt.
 
-## Remaining operational gates
+## Production gate results
 
-- [ ] Deploy to the confirmed canonical Railway service with research disabled.
-- [ ] Verify the deployed worker is healthy.
-- [ ] Complete a funded but non-spending production shadow cycle.
-- [ ] Confirm the exact CDP account's production signing path and hard-limit
-  readback.
-- [ ] Enable enforced mode only if every preceding gate passes.
+- [x] Deployment `47bc7c2e-0fc3-4cb0-9d2a-1da1ec65ffde` reached Railway
+  `SUCCESS` on the confirmed canonical service with research disabled.
+- [x] The deployed health payload reports `eip155:8453`, `$1.00/report`,
+  `$5.00/rolling 24h`, and one report per asset per rolling 24 hours.
+- [ ] The deployed worker is healthy. It fails closed before candidate
+  selection because held governed asset `MAG7.SSI` has no fresh valuation
+  signal.
+- [ ] Complete a funded but non-spending production shadow cycle. This was not
+  attempted because the preceding health gate failed.
+- [ ] Confirm the exact CDP account's production signing path in a genuine
+  candidate cycle. Static restrictions, signer-boundary tests, and the live
+  unpaid challenge passed, but no production signature or payment was made.
+- [ ] Enable enforced mode only if every preceding gate passes. The production
+  mode remains `disabled`, and live execution remains halted.
 
 ## References
 
