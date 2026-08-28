@@ -477,6 +477,70 @@ def load_latest_packets_for_contracts(
     return [newest[contract] for contract in normalized if contract in newest]
 
 
+def load_pair_creation_fallbacks(
+    database_path: Path,
+    contracts: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> dict[str, datetime]:
+    """Recover previously evidenced pool age for providers that omit it later."""
+
+    if not contracts or not database_path.exists():
+        return {}
+    normalized = tuple(dict.fromkeys(contract.lower() for contract in contracts))
+    if len(normalized) > MAX_REQUIRED_CONTRACTS or any(
+        not ADDRESS_PATTERN.fullmatch(contract) for contract in normalized
+    ):
+        raise ValueError("Pair-age fallback contracts are invalid.")
+    placeholders = ",".join("?" for _ in normalized)
+    with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT contract_address, payload_json
+            FROM research_packets
+            WHERE contract_address IN ({placeholders})
+            ORDER BY received_at DESC, packet_id ASC
+            """,  # nosec B608 -- placeholders are generated, not user-controlled
+            normalized,
+        ).fetchall()
+    current_time = now or _utc_now()
+    fallbacks: dict[str, datetime] = {}
+    for contract_address, payload_json in rows:
+        contract = str(contract_address).lower()
+        if contract in fallbacks:
+            continue
+        packet = json.loads(payload_json)
+        stored_digest = packet.get("packet_id")
+        unsigned = {key: value for key, value in packet.items() if key != "packet_id"}
+        expected_digest = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        source = packet.get("source")
+        metrics = packet.get("metrics")
+        if (
+            stored_digest != expected_digest
+            or not isinstance(source, dict)
+            or not isinstance(metrics, dict)
+            or str(source.get("base_contract_address", "")).lower() != contract
+            or source.get("pair_created_at_provider")
+            not in {"dexscreener", "geckoterminal_governed_universe"}
+            or metrics.get("pair_created_at") is None
+        ):
+            continue
+        try:
+            pair_created_at = datetime.fromisoformat(str(metrics["pair_created_at"]))
+        except ValueError:
+            continue
+        if (
+            pair_created_at.tzinfo is None
+            or pair_created_at.utcoffset() is None
+            or pair_created_at > current_time
+        ):
+            continue
+        fallbacks[contract] = pair_created_at.astimezone(timezone.utc)
+    return fallbacks
+
+
 def required_contracts_from_path(path: str) -> tuple[str, ...]:
     parsed = urlparse(path)
     if parsed.path != BASE_RESEARCH_PATH or parsed.fragment:
@@ -505,6 +569,7 @@ def _build_contract_packets(
     *,
     minimum_liquidity: Decimal,
     freshness: int,
+    pair_age_by_contract: dict[str, datetime] | None = None,
 ) -> list[dict[str, object]]:
     profiles = discover_base_contracts(len(contracts), contracts)
     pairs: list[dict[str, object]] = []
@@ -517,11 +582,24 @@ def _build_contract_packets(
     packets = []
     for profile in profiles:
         contract_address = str(profile["contract_address"])
+        pair_created_at_fallback = (pair_age_by_contract or {}).get(
+            contract_address
+        )
+        if pair_created_at_fallback is not None:
+            profile = {
+                **profile,
+                "pair_created_at_fallback": pair_created_at_fallback,
+            }
         approved_quotes = APPROVED_QUOTE_CONTRACTS.get(
             contract_address,
             DISCOVERY_QUOTE_CONTRACTS,
         )
-        eligible = eligible_base_pairs(contract_address, pairs, approved_quotes)
+        eligible = eligible_base_pairs(
+            contract_address,
+            pairs,
+            approved_quotes,
+            pair_created_at_fallback=pair_created_at_fallback,
+        )
         packets.append(
             build_packet(
                 profile,
@@ -562,10 +640,16 @@ def ensure_required_contract_packets(
         if current_time - received_at > REQUIRED_PACKET_MAX_AGE:
             refresh.append(contract)
     if refresh:
+        pair_age_by_contract = load_pair_creation_fallbacks(
+            database_path,
+            tuple(refresh),
+            now=current_time,
+        )
         packets = _build_contract_packets(
             tuple(refresh),
             minimum_liquidity=minimum_liquidity,
             freshness=freshness,
+            pair_age_by_contract=pair_age_by_contract,
         )
         store_packets(database_path, packets)
     result = load_latest_packets_for_contracts(

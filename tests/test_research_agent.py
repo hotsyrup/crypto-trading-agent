@@ -506,7 +506,12 @@ class ResearchAgentTests(unittest.TestCase):
                 )
 
         refresh.assert_called_once_with(
-            (ADDRESS,), minimum_liquidity=Decimal("50000"), freshness=5
+            (ADDRESS,),
+            minimum_liquidity=Decimal("50000"),
+            freshness=5,
+            pair_age_by_contract={
+                ADDRESS: datetime.fromtimestamp(1750000000, tz=timezone.utc)
+            },
         )
         self.assertEqual(packets[0]["packet_id"], fresh["packet_id"])
         self.assertFalse(packets[0]["is_stale"])
@@ -533,6 +538,28 @@ class ResearchAgentTests(unittest.TestCase):
             tuple(packet["contract_address"] for packet in packets),
             contracts,
         )
+
+    def test_on_demand_refresh_reuses_evidenced_pair_age_when_provider_omits_it(self) -> None:
+        pair = sample_pair()
+        pair.pop("pairCreatedAt")
+        pair["quoteToken"]["address"] = (
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        )
+        fallback = datetime.fromtimestamp(1750000000, tz=timezone.utc)
+        with patch("app.research_agent.fetch_pairs", return_value=[pair]):
+            packet = _build_contract_packets(
+                (ADDRESS,),
+                minimum_liquidity=Decimal("50000"),
+                freshness=5,
+                pair_age_by_contract={ADDRESS: fallback},
+            )[0]
+
+        self.assertEqual(packet["metrics"]["pair_created_at"], fallback.isoformat())
+        self.assertEqual(
+            packet["source"]["pair_created_at_provider"],
+            "geckoterminal_governed_universe",
+        )
+        self.assertEqual(packet["data_quality"], "complete")
 
     def test_public_health_exposes_provider_and_execution_boundaries(self) -> None:
         health = public_health_state()
