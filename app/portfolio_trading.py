@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 
+from app.agent_commerce_research import (
+    AgentCommerceResearchGate,
+    ResearchPolicyError,
+    candidate_for_trade,
+)
 from app.base_asset_universe import (
     MAX_FUTURE_SKEW,
     MAX_SNAPSHOT_AGE,
@@ -250,6 +255,7 @@ def execute_research_portfolio_signal(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    agent_commerce_research_gate: AgentCommerceResearchGate | None = None,
 ) -> ControlledLiveResult:
     """Turn one ranked research signal into one fully audited spot attempt.
 
@@ -409,6 +415,36 @@ def execute_research_portfolio_signal(
         f"{asset.symbol}:{asset.token_address}"
     )
     intent_id = hashlib.sha256(intent_seed.encode()).hexdigest()
+    paid_research_ref: str | None = None
+    if agent_commerce_research_gate is not None:
+        try:
+            gate_decision = agent_commerce_research_gate.evaluate(
+                candidate_for_trade(
+                    symbol=asset.symbol,
+                    token_address=asset.token_address or WETH_ADDRESS,
+                    side=side,
+                    trading_decision_id=intent_id,
+                    requested_at=current_time,
+                )
+            )
+        except (OSError, ResearchPolicyError, ValueError) as error:
+            return _policy_rejected(
+                f"Agent Commerce research audit or policy failed: {error}"
+            )
+        if not gate_decision.allowed:
+            return _policy_rejected(
+                f"Agent Commerce research vetoed candidate: {gate_decision.reason}"
+            )
+        if gate_decision.report is not None:
+            paid_research_ref = f"agent-commerce-report:{gate_decision.report.report_id}"
+
+    source_refs = [
+        f"research:{signal.packet_id}",
+        universe.snapshot_sha256,
+        f"portfolio:{portfolio.observed_at.isoformat()}",
+    ]
+    if paid_research_ref is not None:
+        source_refs.append(paid_research_ref)
     intent = TradeIntent(
         intent_id=intent_id,
         strategy_id=STRATEGY_ID,
@@ -427,11 +463,7 @@ def execute_research_portfolio_signal(
         chain_id=BASE_MAINNET_CHAIN_ID,
         market_data_observed_at=signal.observed_at,
         created_at=current_time,
-        source_refs=(
-            f"research:{signal.packet_id}",
-            universe.snapshot_sha256,
-            f"portfolio:{portfolio.observed_at.isoformat()}",
-        ),
+        source_refs=tuple(source_refs),
     )
     asset_token = asset.token_address or NATIVE_ETH_ADDRESS
     swap = ApprovedSwap(

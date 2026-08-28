@@ -11,6 +11,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Callable, Protocol
 
+from app.agent_commerce_research import (
+    AgentCommerceResearchGate,
+    build_research_gate,
+    research_public_status,
+)
 from app.base_asset_universe import (
     AssetUniverseError,
     GovernedAssetUniverse,
@@ -260,6 +265,7 @@ def run_live_cycle(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    agent_commerce_research_gate: AgentCommerceResearchGate | None = None,
 ) -> LiveCycleResult:
     """Verify live inputs and make at most one governed execution attempt."""
 
@@ -333,6 +339,7 @@ def run_live_cycle(
         now=current_time,
         live_config=live_config,
         executor_config=executor_config,
+        agent_commerce_research_gate=agent_commerce_research_gate,
     )
     status = result.status
     if status == "POLICY_REJECTED":
@@ -367,6 +374,7 @@ STATE: dict[str, object] = {
     "mode": "controlled_live_worker",
     "status": "starting",
     "last_cycle_at": None,
+    "agent_commerce_research": research_public_status("disabled"),
 }
 
 
@@ -382,6 +390,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "mode": STATE["mode"],
                 "status": STATE["status"],
                 "last_cycle_at": STATE["last_cycle_at"],
+                "agent_commerce_research": STATE["agent_commerce_research"],
             }
         ).encode()
         self.send_response(200 if STATE["status"] != "failed" else 503)
@@ -446,6 +455,16 @@ def main() -> None:
         while True:
             time.sleep(3600)
     runtime = CdpLiveRuntime()
+    research_gate = build_research_gate(
+        wallet_address=runtime.wallet_address,
+        journal_path=Path(
+            os.getenv(
+                "LUMEN_AGENT_COMMERCE_RESEARCH_JOURNAL_PATH",
+                "data/agent_commerce_research_v1.jsonl",
+            )
+        ),
+    )
+    STATE["agent_commerce_research"] = research_public_status(research_gate.mode)
     interval = int(
         os.getenv(
             "LIVE_WORKER_INTERVAL_SECONDS",
@@ -477,6 +496,7 @@ def main() -> None:
                 now=cycle_time,
                 live_config=load_live_trading_config(),
                 executor_config=load_executor_config(),
+                agent_commerce_research_gate=research_gate,
             )
             STATE.update(
                 status=result.status.lower(),

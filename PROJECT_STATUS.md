@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-27_
+_Last updated: 2026-08-28_
 
 ## Mission
 
@@ -45,6 +45,12 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 - Run a disabled-by-default Railway worker that verifies the CDP wallet and
   Base network, reads paginated balances, maintains the universe, and permits
   at most one governed attempt per cycle
+- Apply a disabled-by-default, veto-only Agent Commerce research gate after the
+  existing strategy creates a candidate and before the existing controlled-live
+  executor; hard limits are `$1/report`, `$5/rolling 24h`, and one paid report
+  per normalized asset per rolling 24h
+- Persist paid-research reservations and candidate evaluations in a locked,
+  fsynced, hash-chained journal, with no automatic retry after ambiguity
 
 ## Live Trading Guardrails Adopted
 
@@ -142,12 +148,19 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Monitor armed execution receipts, balances, and journal integrity.**
+**Deploy and verify Agent Commerce research while its feature flag remains
+disabled, then complete a non-spending shadow cycle before any activation.**
 
 The exact wallet, Base network, fresh research coverage for every held governed
 asset, and all three production hash chains were verified before rearm. Preserve
 the unresolved 3.745010-USDC reservation from 2026-08-24 as charged and never
 retry it automatically.
+
+The Agent Commerce integration is not a strategy or execution authority. A
+favorable report can only let an existing candidate continue through every
+unchanged control; an adverse, invalid, unavailable, stale, or ambiguous result
+rejects that candidate. Activation must not create a test purchase and must wait
+for a genuine strategy candidate.
 
 ## Project Dashboard Roadmap
 
