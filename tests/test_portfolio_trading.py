@@ -25,6 +25,7 @@ from app.portfolio_trading import (
     VerifiedPortfolio,
     execute_research_portfolio_signal,
     research_signal_from_packet,
+    valuation_signal_from_packet,
 )
 from app.research_agent import build_packet
 from app.trading_executor import (
@@ -264,6 +265,53 @@ class PortfolioTradingTests(unittest.TestCase):
         self.assertEqual(research.token_address, AERO_ADDRESS)
         self.assertEqual(research.change_h6_percent, Decimal("3"))
         self.assertEqual(research.packet_id, packet["packet_id"])
+
+    def test_low_liquidity_retained_packet_can_value_but_cannot_enter(self) -> None:
+        pair = {
+            "chainId": "base",
+            "dexId": "aerodrome",
+            "pairAddress": "0x" + "1" * 40,
+            "baseToken": {
+                "address": AERO_ADDRESS,
+                "name": "Aerodrome",
+                "symbol": "AERO",
+            },
+            "quoteToken": {
+                "address": BASE_USDC_ADDRESS,
+                "name": "USD Coin",
+                "symbol": "USDC",
+            },
+            "priceUsd": "0.50",
+            "liquidity": {"usd": "99999"},
+            "volume": {"h24": "15000000", "h6": "4000000"},
+            "priceChange": {"h24": "8", "h6": "3"},
+            "txns": {"h24": {"buys": 1200, "sells": 900}},
+            "pairCreatedAt": 1704067200000,
+            "marketCap": "450000000",
+            "fdv": "500000000",
+            "boosts": {"active": 0},
+        }
+        packet = build_packet(
+            {
+                "contract_address": AERO_ADDRESS,
+                "discovery_source": "configured_watchlist",
+                "profile_url": None,
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            pair,
+            NOW - timedelta(seconds=10),
+            Decimal("100000"),
+            90,
+            1,
+        )
+        packet["is_stale"] = False
+
+        valuation = valuation_signal_from_packet(packet, AERO_ADDRESS, now=NOW)
+
+        self.assertEqual(valuation.price_usd, Decimal("0.50"))
+        with self.assertRaisesRegex(ValueError, "disallowed warning"):
+            research_signal_from_packet(packet, universe(), now=NOW)
 
     def test_malformed_numeric_research_packet_fails_closed(self) -> None:
         pair = {

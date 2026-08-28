@@ -52,6 +52,10 @@ ALLOWED_RESEARCH_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
 }
+VALUATION_ONLY_WARNINGS = ALLOWED_RESEARCH_WARNINGS | {
+    "LIQUIDITY_BELOW_RESEARCH_THRESHOLD",
+    "PAIR_YOUNGER_THAN_7_DAYS",
+}
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ def _research_signal_from_packet(
     universe: GovernedAssetUniverse | None,
     *,
     required_contract: str | None = None,
+    valuation_only: bool = False,
     now: datetime | None = None,
 ) -> ResearchSignal:
     """Normalize one observation-only packet without granting it authority."""
@@ -157,10 +162,14 @@ def _research_signal_from_packet(
     if matched_symbol is None:
         raise ValueError("Research token is outside the governed exact-contract set.")
     warnings = packet.get("warnings")
+    allowed_warnings = (
+        VALUATION_ONLY_WARNINGS if valuation_only else ALLOWED_RESEARCH_WARNINGS
+    )
     if (
         not isinstance(warnings, list)
-        or set(warnings) != ALLOWED_RESEARCH_WARNINGS
-        or len(warnings) != len(ALLOWED_RESEARCH_WARNINGS)
+        or not ALLOWED_RESEARCH_WARNINGS.issubset(warnings)
+        or not set(warnings).issubset(allowed_warnings)
+        or len(warnings) != len(set(warnings))
     ):
         raise ValueError("Research packet contains a disallowed warning.")
     source = packet.get("source")
@@ -191,15 +200,21 @@ def _research_signal_from_packet(
         sells = int(metrics["sells_h24"])
     except (InvalidOperation, KeyError, TypeError, ValueError) as error:
         raise ValueError("Research market metrics are invalid.") from error
-    if (
-        active_boosts != 0
+    invalid_common_metrics = (
+        active_boosts < 0
         or buys < 0
         or sells < 0
         or any(not value.is_finite() for value in values.values())
         or values["price"] <= 0
+        or values["liquidity"] < 0
+        or values["volume"] < 0
+    )
+    invalid_trading_metrics = (
+        active_boosts != 0
         or values["liquidity"] < MINIMUM_LIQUIDITY_USD
         or values["volume"] < MINIMUM_DAILY_VOLUME_USD
-    ):
+    )
+    if invalid_common_metrics or (not valuation_only and invalid_trading_metrics):
         raise ValueError("Research market metrics fail portfolio policy.")
     return ResearchSignal(
         packet_id=packet_id,
@@ -239,6 +254,7 @@ def valuation_signal_from_packet(
         packet,
         None,
         required_contract=token_address,
+        valuation_only=True,
         now=now,
     )
 
