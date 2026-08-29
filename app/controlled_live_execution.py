@@ -86,6 +86,7 @@ class SwapReceipt:
     approval_token: str | None = None
     approval_spender: str | None = None
     approval_amount: Decimal | None = None
+    gas_cost_eth: Decimal | None = None
     error: str | None = None
 
 
@@ -381,6 +382,9 @@ def execute_controlled_live_trade(
             from_decimals=swap.from_decimals,
             to_decimals=swap.to_decimals,
             slippage_bps=swap.slippage_bps,
+            strategy_profile=intent.strategy_profile,
+            entry_score=intent.entry_score,
+            exit_reason=intent.exit_reason,
             path=live_audit_path,
             recorded_at=current_time,
         )
@@ -442,6 +446,8 @@ def execute_controlled_live_trade(
     })
     if receipt.approval_amount is not None:
         details["approval_amount"] = str(receipt.approval_amount)
+    if receipt.gas_cost_eth is not None:
+        details["gas_cost_eth"] = str(receipt.gas_cost_eth)
     details["backend_error_reported"] = receipt.error is not None
     details.pop("error", None)
     if receipt_reasons:
@@ -522,6 +528,26 @@ class CdpAgentKitBackend:
         coroutine.close()
         raise RuntimeError("CDP backend cannot run inside an active event loop.")
 
+    @staticmethod
+    def _gas_cost_eth(receipt: object) -> Decimal | None:
+        def value(name: str) -> object:
+            if isinstance(receipt, dict):
+                return receipt.get(name)
+            return getattr(receipt, name, None)
+
+        gas_used = value("gasUsed") or value("gas_used")
+        gas_price = value("effectiveGasPrice") or value("effective_gas_price")
+        if gas_used is None or gas_price is None:
+            return None
+        try:
+            used = int(str(gas_used), 0)
+            price = int(str(gas_price), 0)
+        except ValueError:
+            return None
+        if used < 0 or price < 0:
+            return None
+        return Decimal(used * price) / Decimal(10**18)
+
     def submit_swap(self, request: ApprovedSwap) -> SwapReceipt:
         if request.route_id != ROUTE_ID:
             raise ValueError("CDP backend received an unapproved route.")
@@ -531,6 +557,7 @@ class CdpAgentKitBackend:
             raise ValueError("CDP backend received an invalid atomic input amount.")
         atomic_input = int(atomic_value)
         approval_transaction_hash: str | None = None
+        approval_gas_cost: Decimal | None = None
         checksum_from_token = _checksum_address(request.from_token)
         checksum_to_token = _checksum_address(request.to_token)
         checksum_wallet = _checksum_address(self._wallet.get_address())
@@ -581,6 +608,7 @@ class CdpAgentKitBackend:
                 )
                 if str(approval_status).lower() not in {"1", "success"}:
                     raise RuntimeError("Exact Permit2 approval transaction failed.")
+                approval_gas_cost = self._gas_cost_eth(approval_receipt)
 
         async def execute_quote() -> tuple[str, str, Decimal, Decimal]:
             client = self._wallet.get_client()
@@ -649,6 +677,19 @@ class CdpAgentKitBackend:
             else getattr(chain_receipt, "status", None)
         )
         success = str(chain_status).lower() in {"1", "success"}
+        swap_gas_cost = self._gas_cost_eth(chain_receipt)
+        gas_cost = (
+            sum(
+                (
+                    value
+                    for value in (approval_gas_cost, swap_gas_cost)
+                    if value is not None
+                ),
+                Decimal("0"),
+            )
+            if approval_gas_cost is not None or swap_gas_cost is not None
+            else None
+        )
         return SwapReceipt(
             success=success,
             transaction_hash=transaction_hash,
@@ -671,6 +712,7 @@ class CdpAgentKitBackend:
             approval_amount=(
                 request.from_amount if approval_transaction_hash is not None else None
             ),
+            gas_cost_eth=gas_cost,
             error=None if success else "CDP swap transaction reverted.",
         )
 

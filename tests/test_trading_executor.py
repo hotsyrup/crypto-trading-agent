@@ -20,6 +20,7 @@ from app.trading_executor import (
     RiskSnapshot,
     TradeIntent,
     evaluate_trade_intent,
+    intent_fingerprint,
     load_executor_config,
     process_shadow_trade_intent,
 )
@@ -101,6 +102,24 @@ class TradingExecutorTests(unittest.TestCase):
         self.assertTrue(decision.shadow_approved)
         self.assertFalse(decision.executable)
         self.assertEqual(decision.signing_authority, "none")
+
+    def test_cautious_profile_preserves_pre_profile_replay_fingerprint(self) -> None:
+        original = trade_intent()
+        annotated_cautious = replace(original, entry_score=99)
+        medium_high = replace(
+            original,
+            strategy_profile="medium_high_v1",
+            entry_score=99,
+        )
+
+        self.assertEqual(
+            intent_fingerprint(original),
+            intent_fingerprint(annotated_cautious),
+        )
+        self.assertNotEqual(
+            intent_fingerprint(original),
+            intent_fingerprint(medium_high),
+        )
 
     def test_halted_switch_rejects(self) -> None:
         decision = self.evaluate(config=executor_config(KILL_SWITCH_HALTED))

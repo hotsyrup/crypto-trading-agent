@@ -219,3 +219,16 @@ def record_live_portfolio_value(
         trading_capital_usdc=capital,
         portfolio_value_usdc=current,
     )
+
+
+def read_live_portfolio_risk(
+    *, path: Path = LIVE_PORTFOLIO_RISK_PATH
+) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            return _load([line.strip() for line in handle if line.strip()])
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

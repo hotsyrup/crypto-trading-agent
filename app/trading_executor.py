@@ -70,6 +70,9 @@ class TradeIntent:
     source_refs: tuple[str, ...]
     unsolicited_asset: bool = False
     product: str = "spot"
+    strategy_profile: str = "cautious_v1"
+    entry_score: int | None = None
+    exit_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,14 @@ def _canonical_value(value: object) -> object:
 
 
 def intent_fingerprint(intent: TradeIntent) -> str:
-    payload = _canonical_value(asdict(intent))
+    intent_payload = asdict(intent)
+    if intent.strategy_profile == "cautious_v1":
+        # Preserve every pre-profile fingerprint so rollback cannot turn a
+        # previously journaled cautious intent into a content conflict.
+        intent_payload.pop("strategy_profile", None)
+        intent_payload.pop("entry_score", None)
+        intent_payload.pop("exit_reason", None)
+    payload = _canonical_value(intent_payload)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -267,6 +277,13 @@ def evaluate_trade_intent(
         reasons.append("Intent ID is required for replay protection.")
     if not intent.strategy_id.strip() or not intent.strategy_version.strip():
         reasons.append("Strategy ID and version are required.")
+    if not intent.strategy_profile.strip():
+        reasons.append("Strategy profile is required.")
+    if (
+        intent.entry_score is not None
+        and (type(intent.entry_score) is not int or not 0 <= intent.entry_score <= 100)
+    ):
+        reasons.append("Entry score must be an integer from 0 through 100.")
     if not intent.source_refs or any(
         not isinstance(item, str) or not item.strip()
         for item in intent.source_refs
@@ -276,6 +293,12 @@ def evaluate_trade_intent(
     side = intent.side.strip().upper()
     if side not in {"BUY", "SELL"}:
         reasons.append("Only BUY or SELL directions are supported.")
+    if side == "BUY" and intent.exit_reason is not None:
+        reasons.append("A buy intent must not carry an exit reason.")
+    if side == "SELL" and intent.strategy_profile == "medium_high_v1" and (
+        not isinstance(intent.exit_reason, str) or not intent.exit_reason.strip()
+    ):
+        reasons.append("A sell intent requires an exit reason.")
     if intent.product.strip().lower() != "spot":
         reasons.append("Only unleveraged spot execution is supported.")
 

@@ -132,6 +132,9 @@ def reserve_live_execution(
     from_decimals: int,
     to_decimals: int,
     slippage_bps: int,
+    strategy_profile: str | None = None,
+    entry_score: int | None = None,
+    exit_reason: str | None = None,
     path: Path = LIVE_EXECUTION_JOURNAL_PATH,
     recorded_at: datetime | None = None,
 ) -> LiveReservation:
@@ -210,6 +213,9 @@ def reserve_live_execution(
                     "from_decimals": from_decimals,
                     "to_decimals": to_decimals,
                     "slippage_bps": slippage_bps,
+                    "strategy_profile": strategy_profile,
+                    "entry_score": entry_score,
+                    "exit_reason": exit_reason,
                 },
             )
             return LiveReservation(

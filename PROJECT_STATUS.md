@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-28_
+_Last updated: 2026-08-29_
 
 ## Mission
 
@@ -8,15 +8,16 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** Base worker operational with trading readiness blocked; retained
-holdings are valued by exact contract and unsolicited holdings are quarantined
+**Overall:** Base worker operational and armed under `medium_high_v1`; the
+latest cycle was policy-blocked because fresh candidates were watch, reject, or
+basis-protected holds
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
-- Live trading: **halted**
-- Unattended live execution: **inactive; production remains financially inert**
+- Live trading: **controlled-live armed under the existing hard limits**
+- Unattended live execution: **active; one medium-high canary confirmed**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
 - Runtime treasury after the first rearmed cycle: 50.331139 USDC plus governed
   Base assets in the dedicated CDP wallet; signing credentials remain
@@ -120,6 +121,28 @@ fresh stored packets per cycle. Worker deployment
 were halted; armed redeployment `ece14685-d2e7-4b60-a503-e6a6758081a1`
 reached `SUCCESS`.
 
+On 2026-08-29, `medium_high_v1` was deployed halted after 286 tests and the
+required secret, compilation, and diff checks passed. The first rearm exposed a
+strategy-journal replay mismatch before any reservation or submission; all
+execution gates were immediately halted and the live audit remained at 123
+events. A deterministic regression test reproduced the error. The repair makes
+each strategy packet single-use and passes its exact journaled decision into
+execution instead of recalculating it against changed history. The corrected
+287-test suite passed. Halted deployment
+`b0288fff-16a0-4418-9ac3-e526046cf502` and armed redeployment
+`6185f588-dad1-4727-8cf2-9e1703cf80af` reached terminal `SUCCESS`. Final
+observed health was operational with 8/8 held coverage, no runtime error,
+Agent Commerce disabled, and no new live reservation or submission.
+
+A later fresh 74-score packet produced the first medium-high canary: 5.151615
+USDC purchased 9.629356944096538793 O with a 50-bps maximum and
+0.000002327046 ETH recorded gas. Independent Base RPC verification returned
+status 1 for approval and swap with 39 confirmations. Direct `balanceOf` and
+the CDP portfolio reader returned 9.629356668767061757 O; the roughly
+0.000286-bps receipt difference is inside the existing 10-bps reconciliation
+tolerance. Receipt-derived basis is present and verified. Two subsequent
+cycles covered 9/9 governed holdings and made no duplicate submission.
+
 On 2026-08-28, canonical worker deployment
 `47bc7c2e-0fc3-4cb0-9d2a-1da1ec65ffde` reached `SUCCESS` with the Agent
 Commerce gate disabled. The runtime health check then failed before candidate
@@ -182,9 +205,9 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Review and classify the 25 quarantined unsolicited holdings. Keep execution
-halted; any Agent Commerce shadow-cycle or trading activation remains a separate
-explicit decision.**
+**Reconcile basis-unavailable governed holdings and review quarantined
+unsolicited holdings while the armed medium-high worker waits for a fresh
+eligible candidate. Agent Commerce remains disabled.**
 
 The exact wallet, Base network, fresh research coverage for every held governed
 asset, and all three production hash chains were verified before rearm. Preserve
@@ -196,6 +219,17 @@ favorable report can only let an existing candidate continue through every
 unchanged control; an adverse, invalid, unavailable, stale, or ambiguous result
 rejects that candidate. Activation must not create a test purchase and must wait
 for a genuine strategy candidate.
+
+## Medium-High Strategy Validation Branch
+
+The versioned `medium_high_v1` profile is implemented behind
+`TRADING_STRATEGY_PROFILE`, with `cautious_v1` remaining the default rollback
+profile. It adds deterministic composite entry scoring, receipt-derived
+persistent cost basis, triple-barrier exits, cooldown/loss guards, strategy
+journaling, metrics, and a synthetic multi-regime backtest. The profile was
+deployed and armed on 2026-08-29 after separate confirmation and halted-first
+production validation. See
+`docs/MEDIUM_HIGH_STRATEGY.md` for formulas and rollout boundaries.
 
 ## Project Dashboard Roadmap
 
