@@ -463,7 +463,7 @@ def execute_research_portfolio_signal(
         return _policy_rejected("Research signal does not meet buy or sell rules.")
 
     intent_seed = (
-        f"{signal.packet_id}:{universe.snapshot_sha256}:{side}:"
+        f"portfolio-intent-v2:{signal.packet_id}:{universe.snapshot_sha256}:{side}:"
         f"{asset.symbol}:{asset.token_address}"
     )
     intent_id = hashlib.sha256(intent_seed.encode()).hexdigest()
@@ -493,7 +493,10 @@ def execute_research_portfolio_signal(
     source_refs = [
         f"research:{signal.packet_id}",
         universe.snapshot_sha256,
-        f"portfolio:{portfolio.observed_at.isoformat()}",
+        (
+            f"portfolio:{portfolio.treasury_address}:"
+            f"{portfolio.total_value_usdc}:{portfolio.usdc_balance}"
+        ),
     ]
     if paid_research_ref is not None:
         source_refs.append(paid_research_ref)
@@ -514,7 +517,7 @@ def execute_research_portfolio_signal(
         recipient_address=portfolio.treasury_address,
         chain_id=BASE_MAINNET_CHAIN_ID,
         market_data_observed_at=signal.observed_at,
-        created_at=current_time,
+        created_at=signal.observed_at,
         source_refs=tuple(source_refs),
     )
     asset_token = asset.token_address or NATIVE_ETH_ADDRESS

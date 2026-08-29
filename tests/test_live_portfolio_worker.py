@@ -41,6 +41,7 @@ from app.trading_executor import (
     EXECUTOR_MODE_SHADOW_ONLY,
     KILL_SWITCH_ARMED,
     KILL_SWITCH_HALTED,
+    STATUS_DUPLICATE_BLOCKED,
     ExecutorConfig,
 )
 
@@ -529,9 +530,9 @@ class LivePortfolioWorkerTests(unittest.TestCase):
             research_payload=exact_research,
             universe=universe(),
             authorized_capital_usdc=Decimal("500"),
-            decision_journal_path=Path(self.temp_dir.name) / "first-decisions.jsonl",
+            decision_journal_path=self.decisions,
             live_audit_path=self.audit,
-            risk_journal_path=Path(self.temp_dir.name) / "first-risk.jsonl",
+            risk_journal_path=self.risk,
             lifecycle_registry_path=registry,
             now=NOW,
             live_config=load_live_trading_config(),
@@ -553,7 +554,7 @@ class LivePortfolioWorkerTests(unittest.TestCase):
 
         self.assertEqual(first.status, CYCLE_POLICY_BLOCKED, first.reason)
         self.assertEqual(first.quarantined_count, 1)
-        self.assertEqual(second.status, CYCLE_POLICY_BLOCKED, second.reason)
+        self.assertEqual(second.status, STATUS_DUPLICATE_BLOCKED, second.reason)
         self.assertEqual(second.portfolio_value_usdc, Decimal("35.730"))
         self.assertIn(CHIP_ADDRESS, requested[-1])
         self.assertEqual(runtime.requests, [])
