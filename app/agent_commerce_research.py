@@ -24,6 +24,9 @@ RESEARCH_ENDPOINT = (
 RESEARCH_NETWORK = "eip155:8453"
 RESEARCH_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 RESEARCH_PAY_TO = "0xfdfadd01edcbabe025931e45cdc8532b00218500"
+CDP_RESEARCH_WALLET_LOOKUP_ADDRESS = (
+    "0x716B5D6Bf67A4C01103B52365C8fB5fdFEf0ff06"
+)
 RESEARCH_AMOUNT_ATOMIC = 1_000_000
 RESEARCH_AMOUNT_USDC = Decimal("1.00")
 RESEARCH_DAILY_LIMIT_USDC = Decimal("5.00")
@@ -814,6 +817,11 @@ class CdpX402ResearchProvider:
         if not 1 <= timeout_seconds <= 30:
             raise ResearchPolicyError("Research HTTP timeout is outside policy.")
         self.wallet_address = wallet_address.lower()
+        self.wallet_lookup_address = (
+            CDP_RESEARCH_WALLET_LOOKUP_ADDRESS
+            if self.wallet_address == CDP_RESEARCH_WALLET_LOOKUP_ADDRESS.lower()
+            else wallet_address
+        )
         self.timeout_seconds = timeout_seconds
 
     @staticmethod
@@ -917,7 +925,10 @@ class CdpX402ResearchProvider:
         from requests.adapters import HTTPAdapter
 
         wallet = CdpEvmWalletProvider(
-            CdpEvmWalletProviderConfig(address=self.wallet_address, network_id="base-mainnet")
+            CdpEvmWalletProviderConfig(
+                address=self.wallet_lookup_address,
+                network_id="base-mainnet",
+            )
         )
         if (
             str(wallet.get_address()).lower() != self.wallet_address

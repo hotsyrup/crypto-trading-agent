@@ -349,6 +349,20 @@ class AgentCommerceResearchTests(unittest.TestCase):
         with self.assertRaises(ResearchUnavailable):
             provider._validate_challenge(challenge(1_000_001))
 
+    def test_cdp_wallet_lookup_preserves_required_checksum(self):
+        provider = CdpX402ResearchProvider(
+            wallet_address="0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06"
+        )
+
+        self.assertEqual(
+            provider.wallet_lookup_address,
+            "0x716B5D6Bf67A4C01103B52365C8fB5fdFEf0ff06",
+        )
+        self.assertEqual(
+            provider.wallet_address,
+            "0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06",
+        )
+
     def test_cdp_signer_boundary_rejects_amount_recipient_and_chain_changes(self):
         wallet = SimpleWallet()
         signer = _CdpX402Signer(wallet, attempt_id="a" * 64, now=NOW)
