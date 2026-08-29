@@ -11,8 +11,10 @@ from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from app.research_agent import (
+    _build_contract_packets,
     build_packet,
     discover_base_contracts,
+    ensure_required_contract_packets,
     eligible_base_pairs,
     fetch_pairs,
     get_json,
@@ -21,6 +23,7 @@ from app.research_agent import (
     main,
     public_health_state,
     public_route_response,
+    required_contracts_from_path,
     run_research_cycle,
     select_primary_pair,
     store_packets,
@@ -179,17 +182,21 @@ class ResearchAgentTests(unittest.TestCase):
                 clear=True,
             ):
                 *_, watchlist = load_config()
-        self.assertEqual(len(watchlist), 25)
+        self.assertEqual(len(watchlist), 26)
         self.assertEqual(watchlist[0], "0x4200000000000000000000000000000000000006")
         self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
+        self.assertEqual(watchlist[-1], "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
 
     @patch("app.research_agent.get_json")
-    def test_fetch_pairs_batches_all_candidates_in_one_provider_request(self, get_json) -> None:
-        get_json.return_value = [sample_pair("100"), sample_pair("200")]
+    def test_fetch_pairs_queries_each_contract_to_avoid_provider_truncation(self, get_json) -> None:
+        get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
         second = "0x0000000000000000000000000000000000000002"
         pairs = fetch_pairs([ADDRESS, second])
         self.assertEqual(len(pairs), 2)
-        get_json.assert_called_once_with(f"/tokens/v1/base/{ADDRESS},{second}")
+        self.assertEqual(
+            [call.args[0] for call in get_json.call_args_list],
+            [f"/tokens/v1/base/{ADDRESS}", f"/tokens/v1/base/{second}"],
+        )
 
     @patch("app.research_agent.store_packets")
     @patch("app.research_agent.fetch_pairs")
@@ -209,7 +216,7 @@ class ResearchAgentTests(unittest.TestCase):
         utc_now.side_effect = [started_at, completed_at]
         load_config_mock.return_value = (
             300,
-            1,
+            25,
             Decimal("50000"),
             5,
             Path("unused.sqlite3"),
@@ -228,6 +235,7 @@ class ResearchAgentTests(unittest.TestCase):
         store_mock.return_value = 1
 
         self.assertEqual(run_research_cycle(), 1)
+        discover_mock.assert_called_once_with(1, (ADDRESS,))
 
         packet = store_mock.call_args.args[1][0]
         self.assertEqual(packet["received_at"], completed_at.isoformat())
@@ -274,6 +282,70 @@ class ResearchAgentTests(unittest.TestCase):
         incomplete = sample_pair("999999")
         incomplete["pairCreatedAt"] = None
         self.assertEqual(eligible_base_pairs(ADDRESS, [complete, incomplete]), [complete])
+
+    def test_official_usdc_pool_can_omit_stablecoin_change_metrics(self) -> None:
+        usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        usdbc = "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca"
+        pair = sample_pair()
+        pair["baseToken"] = {"address": usdc, "name": "USD Coin", "symbol": "USDC"}
+        pair["quoteToken"] = {"address": usdbc, "name": "USD Base Coin", "symbol": "USDbC"}
+        pair["priceUsd"] = "1.00012"
+        pair["priceChange"] = {}
+
+        eligible = eligible_base_pairs(usdc, [pair], {usdbc})
+        packet = build_packet(
+            {
+                "contract_address": usdc,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            eligible[0],
+            datetime(2026, 8, 27, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+            len(eligible),
+        )
+
+        self.assertEqual(packet["symbol"], "USDC")
+        self.assertEqual(packet["data_quality"], "partial")
+        self.assertIn("MARKET_FIELDS_INCOMPLETE", packet["warnings"])
+        self.assertIsNone(packet["metrics"]["price_change_h24_percent"])
+        self.assertIsNone(packet["metrics"]["price_change_h6_percent"])
+
+    def test_governed_pool_age_fills_missing_provider_timestamp(self) -> None:
+        pair = sample_pair()
+        pair["pairCreatedAt"] = None
+        fallback = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+        eligible = eligible_base_pairs(
+            ADDRESS,
+            [pair],
+            pair_created_at_fallback=fallback,
+        )
+        packet = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+                "pair_created_at_fallback": fallback,
+            },
+            eligible[0],
+            datetime(2026, 8, 27, tzinfo=timezone.utc),
+            Decimal("50000"),
+            90,
+            len(eligible),
+        )
+
+        self.assertEqual(packet["data_quality"], "complete")
+        self.assertEqual(packet["metrics"]["pair_created_at"], fallback.isoformat())
+        self.assertEqual(
+            packet["source"]["pair_created_at_provider"],
+            "geckoterminal_governed_universe",
+        )
 
     def test_packet_is_expiring_observation_not_execution(self) -> None:
         now = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)
@@ -389,6 +461,105 @@ class ResearchAgentTests(unittest.TestCase):
             path = Path(directory) / "missing.sqlite3"
             self.assertEqual(load_latest_packets(path), [])
             self.assertFalse(path.exists())
+
+    def test_exact_contract_coverage_refreshes_stale_held_asset(self) -> None:
+        stale = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            5,
+        )
+        fresh = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            5,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.sqlite3"
+            store_packets(path, [stale])
+            config = (60, 25, Decimal("50000"), 5, path, (ADDRESS,))
+            with (
+                patch("app.research_agent.load_config", return_value=config),
+                patch(
+                    "app.research_agent._build_contract_packets",
+                    return_value=[fresh],
+                ) as refresh,
+            ):
+                packets = ensure_required_contract_packets(
+                    (ADDRESS,),
+                    now=datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+                )
+
+        refresh.assert_called_once_with(
+            (ADDRESS,),
+            minimum_liquidity=Decimal("50000"),
+            freshness=5,
+            pair_age_by_contract={
+                ADDRESS: datetime.fromtimestamp(1750000000, tz=timezone.utc)
+            },
+        )
+        self.assertEqual(packets[0]["packet_id"], fresh["packet_id"])
+        self.assertFalse(packets[0]["is_stale"])
+
+    def test_required_contract_query_is_exact_and_bounded(self) -> None:
+        path = f"/research/crypto/base/latest?required_contracts={ADDRESS}"
+        self.assertEqual(required_contracts_from_path(path), (ADDRESS,))
+        with self.assertRaisesRegex(ValueError, "invalid contract"):
+            required_contracts_from_path(
+                "/research/crypto/base/latest?required_contracts=MAG7.SSI"
+            )
+
+    def test_exact_contract_refresh_batches_without_provider_truncation(self) -> None:
+        contracts = tuple(f"0x{number:040x}" for number in range(1, 32))
+        with patch("app.research_agent.fetch_pairs", return_value=[]) as fetch:
+            packets = _build_contract_packets(
+                contracts,
+                minimum_liquidity=Decimal("50000"),
+                freshness=5,
+            )
+
+        self.assertEqual([len(call.args[0]) for call in fetch.call_args_list], [30, 1])
+        self.assertEqual(
+            tuple(packet["contract_address"] for packet in packets),
+            contracts,
+        )
+
+    def test_on_demand_refresh_reuses_evidenced_pair_age_when_provider_omits_it(self) -> None:
+        pair = sample_pair()
+        pair.pop("pairCreatedAt")
+        pair["quoteToken"]["address"] = (
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        )
+        fallback = datetime.fromtimestamp(1750000000, tz=timezone.utc)
+        with patch("app.research_agent.fetch_pairs", return_value=[pair]):
+            packet = _build_contract_packets(
+                (ADDRESS,),
+                minimum_liquidity=Decimal("50000"),
+                freshness=5,
+                pair_age_by_contract={ADDRESS: fallback},
+            )[0]
+
+        self.assertEqual(packet["metrics"]["pair_created_at"], fallback.isoformat())
+        self.assertEqual(
+            packet["source"]["pair_created_at_provider"],
+            "geckoterminal_governed_universe",
+        )
+        self.assertEqual(packet["data_quality"], "complete")
 
     def test_public_health_exposes_provider_and_execution_boundaries(self) -> None:
         health = public_health_state()

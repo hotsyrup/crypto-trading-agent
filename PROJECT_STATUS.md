@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-24_
+_Last updated: 2026-08-28_
 
 ## Mission
 
@@ -8,16 +8,19 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 
 ## Current Status
 
-**Overall:** funded CDP wallet and live path verified through a fail-closed canary
+**Overall:** Base worker operational with trading readiness blocked; retained
+holdings are valued by exact contract and unsolicited holdings are quarantined
 
 - Repository: active on GitHub
 - Runtime target: Railway
 - Network: Base mainnet
 - Core assets: official Base USDC plus a fresh governed top-25 Base universe
-- Live trading: **currently halted after the first fail-closed canary**
-- Unattended live execution: **implemented; corrected canary retry requires explicit approval**
+- Live trading: **halted**
+- Unattended live execution: **inactive; production remains financially inert**
 - Current Python bot: research, market-data collection, signals, risk checks, simulated orders, and journaling
-- Runtime treasury: 25 USDC in the dedicated CDP wallet; signing credentials remain deployment-only
+- Runtime treasury after the first rearmed cycle: 50.331139 USDC plus governed
+  Base assets in the dedicated CDP wallet; signing credentials remain
+  deployment-only
 
 ## What Works Today
 
@@ -43,6 +46,18 @@ Build a modular AI-assisted crypto trading agent that progresses safely from res
 - Run a disabled-by-default Railway worker that verifies the CDP wallet and
   Base network, reads paginated balances, maintains the universe, and permits
   at most one governed attempt per cycle
+- Apply a disabled-by-default, veto-only Agent Commerce research gate after the
+  existing strategy creates a candidate and before the existing controlled-live
+  executor; hard limits are `$1/report`, `$5/rolling 24h`, and one paid report
+  per normalized asset per rolling 24h
+- Persist paid-research reservations and candidate evaluations in a locked,
+  fsynced, hash-chained journal, with no automatic retry after ambiguity
+- Persist an exact-contract asset lifecycle registry that separates current
+  candidates, retained governed holdings, and quarantined unsolicited assets
+- Expand observation-only research coverage on demand for required held
+  contracts without exposing wallet context or granting execution authority
+- Report process liveness separately from trading readiness, so a conservative
+  valuation or quarantine block remains visible without crashing the worker
 
 ## Live Trading Guardrails Adopted
 
@@ -97,18 +112,53 @@ Railway has a healthy persistent volume mounted at `/app/data` and now stores
 variables; credentials remain outside GitHub. Coinbase created the dedicated
 `lumen-trading-agent` API-key wallet at
 `0x716b5d6bf67a4c01103b52365c8fb5fdfef0ff06`. The execution and research
-workers refresh their own exact-25 snapshots before using them. Research
-deployment `f4a6d487-1a4e-437a-a247-4fee1789f6f7` stored all 25 governed packets.
-The trading worker verified 25 USDC in the exact treasury on `base-mainnet`,
-chain ID 8453. The first $1.25 canary was reserved, failed at the AgentKit
-address boundary, and was audit-recorded as `BACKEND_FAILED`; no confirmed
-swap receipt exists. Deployment `b3524e5a-8d26-46d0-8deb-4654bf8a2cb2`
-contains the tested checksum correction and is currently shadow-only with the
-kill switch halted. A retry requires setting all three gates deliberately:
-`LIVE_TRADING_ENABLED=true`, `TRADING_EXECUTOR_MODE=controlled_live`, and
-`TRADING_EXECUTOR_KILL_SWITCH=armed`.
+workers use the exact-25 governed snapshot, while the observation-only research
+service also emits the required official USDC identity packet. Research
+deployment `bdd69396-98d7-40b4-ba40-85775687ad7` reached `SUCCESS` with 26
+fresh stored packets per cycle. Worker deployment
+`eb1032e1-911f-45d4-a630-e490a8c9e62e` was verified while all execution gates
+were halted; armed redeployment `ece14685-d2e7-4b60-a503-e6a6758081a1`
+reached `SUCCESS`.
 
-Do not retry the real-money canary without explicit approval for that action.
+On 2026-08-28, canonical worker deployment
+`47bc7c2e-0fc3-4cb0-9d2a-1da1ec65ffde` reached `SUCCESS` with the Agent
+Commerce gate disabled. The runtime health check then failed before candidate
+selection because the held governed `MAG7.SSI` balance had no fresh valuation
+signal. Live execution therefore remains explicitly halted and the Agent
+Commerce mode remains `disabled`; no shadow request, signature, report
+purchase, or trade occurred.
+
+Later on 2026-08-28, research deployment
+`8852faf8-1459-42b5-b31d-2ad8020e536f` and canonical worker deployment
+`2c5252ef-86c2-436e-902f-f20dbe93a19c` reached terminal `SUCCESS`. The proven
+failure class was candidate-set turnover across independently refreshed
+exact-25 snapshots: a governed holding could fall out of discovery and then
+disappear from fresh valuation coverage. The repair persists held governance by
+exact contract, requests retained coverage independently of candidates, reuses
+previously evidenced pool age when the provider omits it, and separates
+valuation acceptance from new-entry liquidity policy.
+
+Six consecutive production cycles from 20:38:47 through 20:43:57 UTC completed
+with HTTP 200, `held_covered=8`, `held_required=8`, zero failure events, and no
+submission. Twenty-five unsolicited exact-contract holdings were conservatively
+quarantined, so `trading_readiness=blocked` remains explicit. The decision,
+live-execution, and risk journals validated at their unchanged pre-deploy counts
+of 1779, 123, and 3995 entries; the unresolved reservation remains preserved.
+Production remained `LIVE_TRADING_ENABLED=false`, `shadow_only`, kill switch
+`halted`, and Agent Commerce `disabled` throughout.
+
+The first armed cycle used 5.260705 USDC to purchase
+129.402901872644870541 CHIP. Base confirmed approval transaction
+`0x9828966679911b35ec0d6bbb0131d34e8a9934254b3b4fed2f453febc640b629`
+and swap transaction
+`0x09c0de4d08bdeb7c7bba5535e8f2299dcafed21ade0e51709a070743ec252c91`.
+Independent Base RPC then reported 50.331139 official USDC and
+129.40301232553952 CHIP in the exact wallet.
+
+Through 2026-08-27 15:01 UTC, six confirmed cycles had spent 21.278888 USDC
+for 522.984386248333337919 CHIP. Every approval and swap receipt returned Base
+status 1. The read-only wallet snapshot then showed 34.312956 USDC,
+522.984496701227983292 CHIP, and 0.001913206172781036 ETH.
 
 ## Wallet Roles
 
@@ -132,10 +182,20 @@ Lumen's agentic wallet is configured separately through environment configuratio
 
 ## Current Priority
 
-**Validate the top-25 research feed, then obtain approval for a small canary.**
+**Review and classify the 25 quarantined unsolicited holdings. Keep execution
+halted; any Agent Commerce shadow-cycle or trading activation remains a separate
+explicit decision.**
 
-The no-funds exact-wallet/network check is complete. The immediate focus is
-top-25 research-feed verification and one separately approved small canary.
+The exact wallet, Base network, fresh research coverage for every held governed
+asset, and all three production hash chains were verified before rearm. Preserve
+the unresolved 3.745010-USDC reservation from 2026-08-24 as charged and never
+retry it automatically.
+
+The Agent Commerce integration is not a strategy or execution authority. A
+favorable report can only let an existing candidate continue through every
+unchanged control; an adverse, invalid, unavailable, stale, or ambiguous result
+rejects that candidate. Activation must not create a test purchase and must wait
+for a genuine strategy candidate.
 
 ## Project Dashboard Roadmap
 

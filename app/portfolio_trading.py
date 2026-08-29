@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 
+from app.agent_commerce_research import (
+    AgentCommerceResearchGate,
+    ResearchPolicyError,
+    candidate_for_trade,
+)
 from app.base_asset_universe import (
     MAX_FUTURE_SKEW,
     MAX_SNAPSHOT_AGE,
@@ -47,6 +52,10 @@ ALLOWED_RESEARCH_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
 }
+VALUATION_ONLY_WARNINGS = ALLOWED_RESEARCH_WARNINGS | {
+    "LIQUIDITY_BELOW_RESEARCH_THRESHOLD",
+    "PAIR_YOUNGER_THAN_7_DAYS",
+}
 
 
 @dataclass(frozen=True)
@@ -82,10 +91,12 @@ class VerifiedPortfolio:
     positions: tuple[PortfolioPosition, ...]
 
 
-def research_signal_from_packet(
+def _research_signal_from_packet(
     packet: object,
-    universe: GovernedAssetUniverse,
+    universe: GovernedAssetUniverse | None,
     *,
+    required_contract: str | None = None,
+    valuation_only: bool = False,
     now: datetime | None = None,
 ) -> ResearchSignal:
     """Normalize one observation-only packet without granting it authority."""
@@ -133,20 +144,32 @@ def research_signal_from_packet(
 
     contract = str(packet.get("contract_address", "")).lower()
     symbol = str(packet.get("symbol", "")).upper()
-    matched_asset = None
-    for asset in universe.assets:
-        expected_contract = asset.token_address or WETH_ADDRESS
-        expected_symbol = "WETH" if asset.token_address is None else asset.symbol
-        if contract == expected_contract and symbol == expected_symbol:
-            matched_asset = asset
-            break
-    if matched_asset is None:
-        raise ValueError("Research token is outside the governed universe.")
+    matched_symbol = None
+    matched_address = None
+    if universe is not None:
+        for asset in universe.assets:
+            expected_contract = asset.token_address or WETH_ADDRESS
+            expected_symbol = "WETH" if asset.token_address is None else asset.symbol
+            if contract == expected_contract and symbol == expected_symbol:
+                matched_symbol = asset.symbol
+                matched_address = asset.token_address
+                break
+    elif required_contract is not None and contract == required_contract.lower():
+        if not symbol or len(symbol) > 20:
+            raise ValueError("Research token symbol is invalid.")
+        matched_symbol = symbol
+        matched_address = contract
+    if matched_symbol is None:
+        raise ValueError("Research token is outside the governed exact-contract set.")
     warnings = packet.get("warnings")
+    allowed_warnings = (
+        VALUATION_ONLY_WARNINGS if valuation_only else ALLOWED_RESEARCH_WARNINGS
+    )
     if (
         not isinstance(warnings, list)
-        or set(warnings) != ALLOWED_RESEARCH_WARNINGS
-        or len(warnings) != len(ALLOWED_RESEARCH_WARNINGS)
+        or not ALLOWED_RESEARCH_WARNINGS.issubset(warnings)
+        or not set(warnings).issubset(allowed_warnings)
+        or len(warnings) != len(set(warnings))
     ):
         raise ValueError("Research packet contains a disallowed warning.")
     source = packet.get("source")
@@ -177,21 +200,27 @@ def research_signal_from_packet(
         sells = int(metrics["sells_h24"])
     except (InvalidOperation, KeyError, TypeError, ValueError) as error:
         raise ValueError("Research market metrics are invalid.") from error
-    if (
-        active_boosts != 0
+    invalid_common_metrics = (
+        active_boosts < 0
         or buys < 0
         or sells < 0
         or any(not value.is_finite() for value in values.values())
         or values["price"] <= 0
+        or values["liquidity"] < 0
+        or values["volume"] < 0
+    )
+    invalid_trading_metrics = (
+        active_boosts != 0
         or values["liquidity"] < MINIMUM_LIQUIDITY_USD
         or values["volume"] < MINIMUM_DAILY_VOLUME_USD
-    ):
+    )
+    if invalid_common_metrics or (not valuation_only and invalid_trading_metrics):
         raise ValueError("Research market metrics fail portfolio policy.")
     return ResearchSignal(
         packet_id=packet_id,
         observed_at=observed_at,
-        symbol=matched_asset.symbol,
-        token_address=matched_asset.token_address,
+        symbol=matched_symbol,
+        token_address=matched_address,
         price_usd=values["price"],
         liquidity_usd=values["liquidity"],
         daily_volume_usd=values["volume"],
@@ -199,6 +228,34 @@ def research_signal_from_packet(
         change_h24_percent=values["change_h24"],
         buys_h24=buys,
         sells_h24=sells,
+    )
+
+
+def research_signal_from_packet(
+    packet: object,
+    universe: GovernedAssetUniverse,
+    *,
+    now: datetime | None = None,
+) -> ResearchSignal:
+    """Normalize a current-candidate packet through the governed universe."""
+
+    return _research_signal_from_packet(packet, universe, now=now)
+
+
+def valuation_signal_from_packet(
+    packet: object,
+    token_address: str,
+    *,
+    now: datetime | None = None,
+) -> ResearchSignal:
+    """Normalize valuation-only evidence for a retained exact contract."""
+
+    return _research_signal_from_packet(
+        packet,
+        None,
+        required_contract=token_address,
+        valuation_only=True,
+        now=now,
     )
 
 
@@ -250,6 +307,7 @@ def execute_research_portfolio_signal(
     now: datetime | None = None,
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
+    agent_commerce_research_gate: AgentCommerceResearchGate | None = None,
 ) -> ControlledLiveResult:
     """Turn one ranked research signal into one fully audited spot attempt.
 
@@ -409,6 +467,36 @@ def execute_research_portfolio_signal(
         f"{asset.symbol}:{asset.token_address}"
     )
     intent_id = hashlib.sha256(intent_seed.encode()).hexdigest()
+    paid_research_ref: str | None = None
+    if agent_commerce_research_gate is not None:
+        try:
+            gate_decision = agent_commerce_research_gate.evaluate(
+                candidate_for_trade(
+                    symbol=asset.symbol,
+                    token_address=asset.token_address or WETH_ADDRESS,
+                    side=side,
+                    trading_decision_id=intent_id,
+                    requested_at=current_time,
+                )
+            )
+        except (OSError, ResearchPolicyError, ValueError) as error:
+            return _policy_rejected(
+                f"Agent Commerce research audit or policy failed: {error}"
+            )
+        if not gate_decision.allowed:
+            return _policy_rejected(
+                f"Agent Commerce research vetoed candidate: {gate_decision.reason}"
+            )
+        if gate_decision.report is not None:
+            paid_research_ref = f"agent-commerce-report:{gate_decision.report.report_id}"
+
+    source_refs = [
+        f"research:{signal.packet_id}",
+        universe.snapshot_sha256,
+        f"portfolio:{portfolio.observed_at.isoformat()}",
+    ]
+    if paid_research_ref is not None:
+        source_refs.append(paid_research_ref)
     intent = TradeIntent(
         intent_id=intent_id,
         strategy_id=STRATEGY_ID,
@@ -427,11 +515,7 @@ def execute_research_portfolio_signal(
         chain_id=BASE_MAINNET_CHAIN_ID,
         market_data_observed_at=signal.observed_at,
         created_at=current_time,
-        source_refs=(
-            f"research:{signal.packet_id}",
-            universe.snapshot_sha256,
-            f"portfolio:{portfolio.observed_at.isoformat()}",
-        ),
+        source_refs=tuple(source_refs),
     )
     asset_token = asset.token_address or NATIVE_ETH_ADDRESS
     swap = ApprovedSwap(

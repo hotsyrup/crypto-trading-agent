@@ -1,6 +1,9 @@
+import json
 import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from unittest.mock import patch
 
 from app.research_feed import (
     APPROVED_QUOTE_CONTRACTS,
@@ -9,6 +12,7 @@ from app.research_feed import (
     WETH_CONTRACT,
     _packet_digest,
     evaluate_research_payload,
+    get_research_payload,
 )
 
 
@@ -42,6 +46,7 @@ class ResearchFeedTests(unittest.TestCase):
                 "eligible_pair_count": 2,
                 "base_contract_address": contract,
                 "quote_contract_address": APPROVED_QUOTE_CONTRACTS[contract],
+                "pair_created_at_provider": "dexscreener",
             },
             "metrics": {
                 "price_usd": "2000" if contract == WETH_CONTRACT else "1.00",
@@ -86,11 +91,51 @@ class ResearchFeedTests(unittest.TestCase):
         change(packet)
         packet["packet_id"] = _packet_digest(packet)
 
+    @patch("app.research_feed.urlopen")
+    def test_exact_required_contracts_are_sent_without_wallet_context(self, urlopen):
+        response = BytesIO(json.dumps(self.payload()).encode())
+        response.headers = {}
+        urlopen.return_value = response
+
+        get_research_payload((WETH_CONTRACT, USDC_CONTRACT))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://lumen-base-research-agent-production.up.railway.app"
+            "/research/crypto/base/latest?required_contracts="
+            f"{WETH_CONTRACT}%2C{USDC_CONTRACT}",
+        )
+        self.assertNotIn("wallet", request.full_url)
+
     def test_fresh_complete_authenticated_packets_pass(self):
         decision = evaluate_research_payload(self.payload(), now=self.now)
         self.assertTrue(decision.ready, decision.reason)
         self.assertEqual(decision.age_seconds, 30)
         self.assertEqual(decision.qualities, ("complete", "complete"))
+
+    def test_usdc_identity_packet_accepts_explicit_missing_change_metrics(self):
+        payload = self.payload()
+        self.mutate(
+            payload,
+            USDC_CONTRACT,
+            lambda packet: (
+                packet["metrics"].update(
+                    price_change_h24_percent=None,
+                    price_change_h6_percent=None,
+                ),
+                packet.update(data_quality="partial"),
+                packet["warnings"].append("MARKET_FIELDS_INCOMPLETE"),
+                packet["warnings"].sort(),
+            ),
+        )
+
+        decision = evaluate_research_payload(payload, now=self.now)
+        self.assertTrue(decision.ready, decision.reason)
+        self.assertEqual(
+            decision.qualities,
+            ("complete", "stablecoin_identity_only"),
+        )
 
     def test_partial_packet_fails_closed(self):
         payload = self.payload()

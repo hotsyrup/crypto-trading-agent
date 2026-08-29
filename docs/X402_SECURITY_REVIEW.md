@@ -1,104 +1,100 @@
 # x402 Security Review
 
-Status: completed for the current observation-only architecture
+Status: bounded Agent Commerce client implemented; activation remains gated
 
-Review date: 2026-08-08
-Scope: Lumen operating-wallet service purchases and the trading-agent boundary
+Review dates: 2026-08-08 and 2026-08-28
+Scope: the controlled-live trading worker's veto-only Agent Commerce purchase
 
 ## Conclusion
 
-The trading application currently has no x402 client, signer, facilitator
-credential, payment retry loop, or paid-service execution path. Its exposure is
-therefore limited to future integration risk. Lumen's separate operating wallet
-has a bounded one-time budget and a verified history of small x402 purchases,
-but those purchases are not controlled by this repository.
+The previous observation-only decision is superseded only for the single
+hard-coded Agent Commerce research product documented in
+`docs/AGENT_COMMERCE_RESEARCH.md`. No generic purchasing, arbitrary URL,
+arbitrary recipient, alternate token, alternate network, dynamic amount,
+Permit2, batch, `upto`, or model-directed payment capability was added.
 
-No unattended x402 payment path should be added until every mandatory control
-below is implemented and tested. The new `TreasuryPolicy` layer is deliberately
-observation-only and cannot execute or authorize a payment.
+The code was deployed to the confirmed production worker with the feature
+disabled. Enforced purchasing is not ready: the worker's pre-candidate
+portfolio verification is unhealthy, so the health and non-spending shadow
+gates did not pass.
 
-## Evidence reviewed
-
-- Wang et al., *When HTTP 402 Meets the Blockchain: Risks on Emerging x402
-  Payments* (2026-07-21): defines authorization-correctness and
-  execution-safety rules and reports violations across all 15 facilitators
-  tested. https://arxiv.org/abs/2607.19545
-- Ling et al., *Free-Riding in the AI Economy* (2026-05-29): describes
-  context-substitution, concurrency, atomicity, and dynamic-allowance risks.
-  https://arxiv.org/abs/2605.30998
-- Li et al., *402Pilot* (2026-08-02): supports separating buyer-side purchasing
-  policy from payment execution and evaluating value under a finite wallet.
-  https://arxiv.org/abs/2608.01341
-- x402 Foundation specification: documents the client, resource-server, and
-  facilitator trust boundary and the exact, upto, and batch schemes.
-  https://github.com/x402-foundation/x402
-- Coinbase facilitator and troubleshooting documentation: documents
-  verification, settlement, version, network, signature, expiry, KYT, and
-  mainnet-facilitator failure modes.
-  https://docs.cdp.coinbase.com/x402/core-concepts/facilitator
-  https://docs.cdp.coinbase.com/x402/support/troubleshooting
-
-## Mandatory buyer-side controls
+## Implemented controls
 
 ### Before payment
 
-- [x] Use a separate operating wallet with a bounded balance.
-- [x] Keep the trading treasury and operating wallet as distinct roles.
-- [x] Require a recorded purpose, expected benefit, price, remaining budget,
-  evidence, and cheaper-alternative analysis.
-- [x] Reject recurring commitments and purposes outside the wallet mandate.
-- [x] Keep the initial policy in observation-only mode with no signer or payer.
-- [ ] Allowlist HTTPS service domains and block redirects to another origin.
-- [ ] Pin or independently verify provider identity and the expected resource.
-- [ ] Validate the x402 version, scheme, network, asset contract, amount,
-  recipient, expiry, and nonce against the original payment requirements.
-- [ ] Bind the authorization to the exact resource and request context so a
-  proof cannot be substituted across resources.
-- [ ] Permit only the reviewed `exact` scheme initially. Reject `upto`, batch,
-  escrow, Permit2, arbitrary calldata, contract deployment, and unknown
-  extensions until separately reviewed.
-- [ ] Enforce deterministic per-request, daily, and lifetime spending ceilings
-  outside the model and outside the service response.
-- [ ] Remove personal data, secrets, private URLs, and unnecessary rationale
-  from payment metadata before it leaves Lumen.
+- [x] Invoke the gate only for a buy/sell candidate created by the existing
+  deterministic strategy.
+- [x] Default the feature flag to `disabled`.
+- [x] Pin the HTTPS endpoint and reject redirects.
+- [x] Pin x402 v2, `exact`, Base `eip155:8453`, official USDC, 1,000,000 atomic
+  units, the reviewed payee, and a maximum 300-second authorization.
+- [x] Reject Permit2, alternate schemes, alternate resources, and changed
+  challenge terms.
+- [x] Enforce `$1.00` per report, `$5.00` per rolling 24 hours, and one
+  authorization per normalized asset per rolling 24 hours outside model and
+  service output.
+- [x] Remove holdings, credentials, and secret material from the request and
+  audit record.
+- [x] Revalidate the complete EIP-712 domain and EIP-3009 authorization at the
+  CDP signing boundary.
 
-### During verification and settlement
+### During payment and settlement
 
-- [ ] Use an explicitly allowlisted mainnet facilitator and verify that its
-  network support matches Base mainnet (`eip155:8453`).
-- [ ] Treat verification as provisional. Do not deliver success internally
-  until the intended settlement is confirmed or the provider's atomic flow is
-  independently verified.
-- [ ] Reject expired, reused, malformed, underfunded, mismatched, or
-  non-settleable authorizations.
-- [ ] Enforce single-use idempotency keys and a durable replay/nonce journal.
-- [ ] Bound facilitator-sponsored gas and reject any attacker-selected
-  execution path.
-- [ ] Never retry automatically after an ambiguous verification, timeout, or
-  settlement response; reconcile first.
+- [x] Reserve budget in a locked, hash-chained, fsynced journal before signing.
+- [x] Use a deterministic single-use CDP signing idempotency key.
+- [x] Disable HTTP redirects and retries.
+- [x] Make at most one signed request.
+- [x] Treat every post-reservation error as ambiguous and keep it charged.
+- [x] Require exact payer, network, amount, and transaction in the x402
+  settlement response.
+- [x] Independently require a successful Base receipt and exactly one pinned
+  official-USDC transfer log for 1,000,000 atomic units.
 
 ### After payment
 
-- [ ] Reconcile the quoted amount, recipient, asset, transaction hash, receipt,
-  wallet balance change, and delivered service result.
-- [x] Record failed, rejected, timed-out, duplicated, and partially fulfilled
-  attempts as well as successful purchases.
-- [x] Feed service quality and usefulness back into TreasuryPolicy so future
-  recommendations reflect observed value rather than provider claims.
-- [ ] Halt the payment path on an unexpected transfer, duplicate, mismatch,
-  facilitator anomaly, or missing audit record.
-- [ ] Maintain a human-readable nightly spending report and a recoverable
-  append-only machine journal.
+- [x] Validate a bounded, current report before it can influence a candidate.
+- [x] Cache successful report controls for 24 hours per normalized asset.
+- [x] Apply only the three approved veto rules.
+- [x] Preserve every existing strategy, risk, size, kill-switch, execution, and
+  receipt control after a favorable report.
+- [x] Record all required candidate, report, payment, cache, decision, and
+  settlement fields without authorization headers or credentials.
+- [x] Fail closed for the affected candidate while leaving the worker alive.
 
-## Current readiness decision
+## Adversarial test coverage
 
-`NOT READY FOR UNATTENDED X402 PAYMENTS`
+Tests cover candidate versus non-candidate behavior, disabled and shadow modes,
+the per-asset cache, rolling-window expiry, exact per-call and rolling budget
+ceilings, same-asset concurrency, every veto rule, favorable pass behavior,
+malformed and stale reports, pre-signing unavailability, ambiguous settlement
+without repayment, tamper-evident audit persistence, and proof that favorable
+research cannot bypass the existing executor halt.
 
-Observation and research may continue. A future implementation may advance
-only after the unchecked controls above have code, adversarial tests, and a
-recorded approval under Lumen's operating-wallet mandate.
+## Production gate results
 
-The checked post-payment controls above are implemented as an append-only
-local receipt ledger and observation-only provider scorecard. They do not
-capture payments automatically and do not create an x402 client, signer,
-facilitator credential, retry loop, or authorization path.
+- [x] Deployment `47bc7c2e-0fc3-4cb0-9d2a-1da1ec65ffde` reached Railway
+  `SUCCESS` on the confirmed canonical service with research disabled.
+- [x] The deployed health payload reports `eip155:8453`, `$1.00/report`,
+  `$5.00/rolling 24h`, and one report per asset per rolling 24 hours.
+- [ ] The deployed worker is healthy. It fails closed before candidate
+  selection because held governed asset `MAG7.SSI` has no fresh valuation
+  signal.
+- [ ] Complete a funded but non-spending production shadow cycle. This was not
+  attempted because the preceding health gate failed.
+- [ ] Confirm the exact CDP account's production signing path in a genuine
+  candidate cycle. Static restrictions, signer-boundary tests, and the live
+  unpaid challenge passed, but no production signature or payment was made.
+- [ ] Enable enforced mode only if every preceding gate passes. The production
+  mode remains `disabled`, and live execution remains halted.
+
+## References
+
+- x402 Foundation specification: https://github.com/x402-foundation/x402
+- Coinbase CDP EVM account signing:
+  https://docs.cdp.coinbase.com/api-reference/v2/rest-api/evm-accounts/evm-accounts
+- Agent Commerce catalog:
+  https://lumen-agent-commerce-production.up.railway.app/v1/catalog
+- Agent Commerce OpenAPI:
+  https://lumen-agent-commerce-production.up.railway.app/openapi.json
+- Agent Commerce instructions:
+  https://lumen-agent-commerce-production.up.railway.app/llms.txt

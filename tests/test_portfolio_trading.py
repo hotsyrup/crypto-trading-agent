@@ -6,6 +6,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
+from app.agent_commerce_research import (
+    AgentCommerceResearchGate,
+    PreparedResearchPayment,
+    PurchasedResearch,
+)
 from app.controlled_live_execution import (
     CDP_NETWORK_ID,
     PERMIT2_ADDRESS,
@@ -20,6 +25,7 @@ from app.portfolio_trading import (
     VerifiedPortfolio,
     execute_research_portfolio_signal,
     research_signal_from_packet,
+    valuation_signal_from_packet,
 )
 from app.research_agent import build_packet
 from app.trading_executor import (
@@ -122,6 +128,30 @@ class Backend:
             approval_token=request.from_token,
             approval_spender=PERMIT2_ADDRESS,
             approval_amount=request.from_amount,
+        )
+
+
+class FavorableResearchProvider:
+    def __init__(self) -> None:
+        self.pay_calls = 0
+
+    def prepare(self, candidate):
+        return PreparedResearchPayment({}, object())
+
+    def pay(self, prepared, *, attempt_id, now):
+        self.pay_calls += 1
+        return PurchasedResearch(
+            {
+                "report_id": "favorable-report",
+                "report": {
+                    "as_of": now.date().isoformat(),
+                    "verdict": "consider",
+                    "thesis_status": "supported",
+                    "confidence": "medium",
+                    "red_flags": [],
+                },
+            },
+            "0x" + "c" * 64,
         )
 
 
@@ -236,6 +266,53 @@ class PortfolioTradingTests(unittest.TestCase):
         self.assertEqual(research.change_h6_percent, Decimal("3"))
         self.assertEqual(research.packet_id, packet["packet_id"])
 
+    def test_low_liquidity_retained_packet_can_value_but_cannot_enter(self) -> None:
+        pair = {
+            "chainId": "base",
+            "dexId": "aerodrome",
+            "pairAddress": "0x" + "1" * 40,
+            "baseToken": {
+                "address": AERO_ADDRESS,
+                "name": "Aerodrome",
+                "symbol": "AERO",
+            },
+            "quoteToken": {
+                "address": BASE_USDC_ADDRESS,
+                "name": "USD Coin",
+                "symbol": "USDC",
+            },
+            "priceUsd": "0.50",
+            "liquidity": {"usd": "99999"},
+            "volume": {"h24": "15000000", "h6": "4000000"},
+            "priceChange": {"h24": "8", "h6": "3"},
+            "txns": {"h24": {"buys": 1200, "sells": 900}},
+            "pairCreatedAt": 1704067200000,
+            "marketCap": "450000000",
+            "fdv": "500000000",
+            "boosts": {"active": 0},
+        }
+        packet = build_packet(
+            {
+                "contract_address": AERO_ADDRESS,
+                "discovery_source": "configured_watchlist",
+                "profile_url": None,
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            pair,
+            NOW - timedelta(seconds=10),
+            Decimal("100000"),
+            90,
+            1,
+        )
+        packet["is_stale"] = False
+
+        valuation = valuation_signal_from_packet(packet, AERO_ADDRESS, now=NOW)
+
+        self.assertEqual(valuation.price_usd, Decimal("0.50"))
+        with self.assertRaisesRegex(ValueError, "disallowed warning"):
+            research_signal_from_packet(packet, universe(), now=NOW)
+
     def test_malformed_numeric_research_packet_fails_closed(self) -> None:
         pair = {
             "chainId": "base",
@@ -348,6 +425,61 @@ class PortfolioTradingTests(unittest.TestCase):
 
         self.assertEqual(result.status, STATUS_POLICY_REJECTED)
         self.assertIn("universe is stale", " ".join(result.reasons).lower())
+        self.assertEqual(backend.requests, [])
+
+    def test_non_candidate_never_requests_paid_research(self) -> None:
+        provider = FavorableResearchProvider()
+        gate = AgentCommerceResearchGate(
+            mode="enforced",
+            provider=provider,
+            journal_path=Path(self.temp_dir.name) / "research.jsonl",
+        )
+        backend = Backend()
+
+        result = execute_research_portfolio_signal(
+            signal(change_h6_percent=Decimal("1"), change_h24_percent=Decimal("-1")),
+            portfolio(),
+            risk(),
+            universe(),
+            backend,
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            now=NOW,
+            live_config=self.live_config,
+            executor_config=self.executor_config,
+            agent_commerce_research_gate=gate,
+        )
+
+        self.assertEqual(result.status, STATUS_POLICY_REJECTED)
+        self.assertEqual(provider.pay_calls, 0)
+        self.assertEqual(backend.requests, [])
+
+    def test_favorable_research_cannot_override_existing_execution_halt(self) -> None:
+        provider = FavorableResearchProvider()
+        gate = AgentCommerceResearchGate(
+            mode="enforced",
+            provider=provider,
+            journal_path=Path(self.temp_dir.name) / "research.jsonl",
+        )
+        backend = Backend()
+        halted = replace(self.executor_config, kill_switch_state="halted")
+
+        result = execute_research_portfolio_signal(
+            signal(),
+            portfolio(),
+            risk(),
+            universe(),
+            backend,
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            now=NOW,
+            live_config=self.live_config,
+            executor_config=halted,
+            agent_commerce_research_gate=gate,
+        )
+
+        self.assertEqual(provider.pay_calls, 1)
+        self.assertEqual(result.status, STATUS_POLICY_REJECTED)
         self.assertEqual(backend.requests, [])
 
 

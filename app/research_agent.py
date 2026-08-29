@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -29,6 +29,8 @@ DEXSCREENER_ORIGIN = "https://api.dexscreener.com"
 ALLOWED_API_HOST = "api.dexscreener.com"
 ADDRESS_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 MAX_API_CANDIDATES = 30
+MAX_REQUIRED_CONTRACTS = 50
+REQUIRED_PACKET_MAX_AGE = timedelta(seconds=90)
 MAX_PROVIDER_ATTEMPTS = 3
 RESEARCH_SCHEMA_VERSION = 2
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
@@ -62,6 +64,7 @@ STATE: dict[str, object] = {
     "packets_stored": 0,
     "last_error": None,
 }
+RESEARCH_PROVIDER_LOCK = threading.Lock()
 
 
 def _utc_now() -> datetime:
@@ -157,10 +160,13 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
         raise ValueError("DEX Screener accepts at most 30 token addresses per batch.")
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
-    payload = get_json(f"/tokens/v1/base/{','.join(addresses)}")
-    if not isinstance(payload, list):
-        raise ValueError("DEX Screener tokens response must be a list.")
-    return [pair for pair in payload if isinstance(pair, dict)]
+    pairs: list[dict[str, object]] = []
+    for address in addresses:
+        payload = get_json(f"/tokens/v1/base/{address}")
+        if not isinstance(payload, list):
+            raise ValueError("DEX Screener tokens response must be a list.")
+        pairs.extend(pair for pair in payload if isinstance(pair, dict))
+    return pairs
 
 
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
@@ -169,24 +175,30 @@ def _pair_liquidity(pair: dict[str, object]) -> Decimal:
     return _decimal(value) or Decimal("0")
 
 
-def _pair_has_complete_core_metrics(pair: dict[str, object]) -> bool:
+def _pair_has_complete_core_metrics(
+    pair: dict[str, object],
+    contract_address: str,
+    *,
+    pair_created_at_fallback: datetime | None = None,
+) -> bool:
     volume = pair.get("volume") if isinstance(pair.get("volume"), dict) else {}
     changes = pair.get("priceChange") if isinstance(pair.get("priceChange"), dict) else {}
     transactions = pair.get("txns") if isinstance(pair.get("txns"), dict) else {}
     h24_transactions = (
         transactions.get("h24") if isinstance(transactions.get("h24"), dict) else {}
     )
-    required = (
+    required = [
         pair.get("priceUsd"),
         _pair_liquidity(pair),
         volume.get("h24"),
         volume.get("h6"),
-        changes.get("h24"),
-        changes.get("h6"),
         h24_transactions.get("buys"),
         h24_transactions.get("sells"),
-        pair.get("pairCreatedAt"),
-    )
+    ]
+    if pair.get("pairCreatedAt") is None and pair_created_at_fallback is None:
+        required.append(None)
+    if contract_address.lower() != USDC_CONTRACT:
+        required.extend((changes.get("h24"), changes.get("h6")))
     return all(value is not None for value in required)
 
 
@@ -194,6 +206,8 @@ def eligible_base_pairs(
     contract_address: str,
     pairs: list[dict[str, object]],
     approved_quote_addresses: set[str] | None = None,
+    *,
+    pair_created_at_fallback: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Return Base pools where the researched contract is the base token."""
     eligible = []
@@ -217,7 +231,11 @@ def eligible_base_pairs(
                 approved_quote_addresses is None
                 or quote_address.lower() in approved_quote_addresses
             )
-            and _pair_has_complete_core_metrics(pair)
+            and _pair_has_complete_core_metrics(
+                pair,
+                contract_address,
+                pair_created_at_fallback=pair_created_at_fallback,
+            )
         ):
             eligible.append(pair)
     return eligible
@@ -253,6 +271,7 @@ def build_packet(
     dex_id = None
     base_contract_address = None
     quote_contract_address = None
+    pair_created_at_provider = None
 
     if pair is None:
         warnings.append("NO_BASE_DENOMINATED_PAIR_FOUND")
@@ -277,8 +296,14 @@ def build_packet(
         created_at = None
         if isinstance(created_ms, (int, float)):
             created_at = datetime.fromtimestamp(created_ms / 1000, timezone.utc)
-            if received_at - created_at < timedelta(days=7):
-                warnings.append("PAIR_YOUNGER_THAN_7_DAYS")
+            pair_created_at_provider = "dexscreener"
+        elif isinstance(profile.get("pair_created_at_fallback"), datetime):
+            fallback = profile["pair_created_at_fallback"]
+            if fallback.tzinfo is not None and fallback.utcoffset() is not None:
+                created_at = fallback.astimezone(timezone.utc)
+                pair_created_at_provider = "geckoterminal_governed_universe"
+        if created_at is not None and received_at - created_at < timedelta(days=7):
+            warnings.append("PAIR_YOUNGER_THAN_7_DAYS")
         if liquidity < minimum_liquidity_usd:
             warnings.append("LIQUIDITY_BELOW_RESEARCH_THRESHOLD")
         metrics = {
@@ -330,6 +355,7 @@ def build_packet(
             "eligible_pair_count": eligible_pair_count,
             "base_contract_address": base_contract_address,
             "quote_contract_address": quote_contract_address,
+            "pair_created_at_provider": pair_created_at_provider,
         },
         "metrics": metrics,
         "warnings": sorted(set(warnings)),
@@ -382,7 +408,7 @@ def store_packets(database_path: Path, packets: list[dict[str, object]]) -> int:
 
 def load_latest_packets(
     database_path: Path,
-    limit: int = 25,
+    limit: int = MAX_API_CANDIDATES,
     now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Read recent public packets without creating or modifying the database."""
@@ -408,6 +434,233 @@ def load_latest_packets(
         packet["is_stale"] = expires_at <= current_time
         packets.append(packet)
     return packets
+
+
+def load_latest_packets_for_contracts(
+    database_path: Path,
+    contracts: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Return exactly the newest stored packet for each requested contract."""
+
+    if not contracts:
+        return []
+    if len(contracts) > MAX_REQUIRED_CONTRACTS:
+        raise ValueError("Required research coverage exceeds 50 contracts.")
+    normalized = tuple(dict.fromkeys(contract.lower() for contract in contracts))
+    if any(not ADDRESS_PATTERN.fullmatch(contract) for contract in normalized):
+        raise ValueError("Required research coverage contains an invalid contract.")
+    if not database_path.exists():
+        return []
+    placeholders = ",".join("?" for _ in normalized)
+    with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT contract_address, payload_json
+            FROM research_packets
+            WHERE contract_address IN ({placeholders})
+            ORDER BY received_at DESC, packet_id ASC
+            """,  # nosec B608 -- placeholders are generated, not user-controlled
+            normalized,
+        ).fetchall()
+    newest: dict[str, dict[str, object]] = {}
+    current_time = now or _utc_now()
+    for contract_address, payload_json in rows:
+        contract = str(contract_address).lower()
+        if contract in newest:
+            continue
+        packet = json.loads(payload_json)
+        expires_at = datetime.fromisoformat(str(packet["expires_at"]))
+        packet["is_stale"] = expires_at <= current_time
+        newest[contract] = packet
+    return [newest[contract] for contract in normalized if contract in newest]
+
+
+def load_pair_creation_fallbacks(
+    database_path: Path,
+    contracts: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> dict[str, datetime]:
+    """Recover previously evidenced pool age for providers that omit it later."""
+
+    if not contracts or not database_path.exists():
+        return {}
+    normalized = tuple(dict.fromkeys(contract.lower() for contract in contracts))
+    if len(normalized) > MAX_REQUIRED_CONTRACTS or any(
+        not ADDRESS_PATTERN.fullmatch(contract) for contract in normalized
+    ):
+        raise ValueError("Pair-age fallback contracts are invalid.")
+    placeholders = ",".join("?" for _ in normalized)
+    with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT contract_address, payload_json
+            FROM research_packets
+            WHERE contract_address IN ({placeholders})
+            ORDER BY received_at DESC, packet_id ASC
+            """,  # nosec B608 -- placeholders are generated, not user-controlled
+            normalized,
+        ).fetchall()
+    current_time = now or _utc_now()
+    fallbacks: dict[str, datetime] = {}
+    for contract_address, payload_json in rows:
+        contract = str(contract_address).lower()
+        if contract in fallbacks:
+            continue
+        packet = json.loads(payload_json)
+        stored_digest = packet.get("packet_id")
+        unsigned = {key: value for key, value in packet.items() if key != "packet_id"}
+        expected_digest = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        source = packet.get("source")
+        metrics = packet.get("metrics")
+        if (
+            stored_digest != expected_digest
+            or not isinstance(source, dict)
+            or not isinstance(metrics, dict)
+            or str(source.get("base_contract_address", "")).lower() != contract
+            or source.get("pair_created_at_provider")
+            not in {"dexscreener", "geckoterminal_governed_universe"}
+            or metrics.get("pair_created_at") is None
+        ):
+            continue
+        try:
+            pair_created_at = datetime.fromisoformat(str(metrics["pair_created_at"]))
+        except ValueError:
+            continue
+        if (
+            pair_created_at.tzinfo is None
+            or pair_created_at.utcoffset() is None
+            or pair_created_at > current_time
+        ):
+            continue
+        fallbacks[contract] = pair_created_at.astimezone(timezone.utc)
+    return fallbacks
+
+
+def required_contracts_from_path(path: str) -> tuple[str, ...]:
+    parsed = urlparse(path)
+    if parsed.path != BASE_RESEARCH_PATH or parsed.fragment:
+        return ()
+    if not parsed.query:
+        return ()
+    query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+    if set(query) != {"required_contracts"} or len(query["required_contracts"]) != 1:
+        raise ValueError("Research coverage query fields are invalid.")
+    values = tuple(
+        dict.fromkeys(
+            contract.strip().lower()
+            for contract in query["required_contracts"][0].split(",")
+            if contract.strip()
+        )
+    )
+    if not values or len(values) > MAX_REQUIRED_CONTRACTS:
+        raise ValueError("Research coverage query must contain 1 through 50 contracts.")
+    if any(not ADDRESS_PATTERN.fullmatch(contract) for contract in values):
+        raise ValueError("Research coverage query contains an invalid contract.")
+    return values
+
+
+def _build_contract_packets(
+    contracts: tuple[str, ...],
+    *,
+    minimum_liquidity: Decimal,
+    freshness: int,
+    pair_age_by_contract: dict[str, datetime] | None = None,
+) -> list[dict[str, object]]:
+    profiles = discover_base_contracts(len(contracts), contracts)
+    pairs: list[dict[str, object]] = []
+    with RESEARCH_PROVIDER_LOCK:
+        for offset in range(0, len(contracts), MAX_API_CANDIDATES):
+            pairs.extend(
+                fetch_pairs(list(contracts[offset : offset + MAX_API_CANDIDATES]))
+            )
+    received_at = _utc_now()
+    packets = []
+    for profile in profiles:
+        contract_address = str(profile["contract_address"])
+        pair_created_at_fallback = (pair_age_by_contract or {}).get(
+            contract_address
+        )
+        if pair_created_at_fallback is not None:
+            profile = {
+                **profile,
+                "pair_created_at_fallback": pair_created_at_fallback,
+            }
+        approved_quotes = APPROVED_QUOTE_CONTRACTS.get(
+            contract_address,
+            DISCOVERY_QUOTE_CONTRACTS,
+        )
+        eligible = eligible_base_pairs(
+            contract_address,
+            pairs,
+            approved_quotes,
+            pair_created_at_fallback=pair_created_at_fallback,
+        )
+        packets.append(
+            build_packet(
+                profile,
+                max(eligible, key=_pair_liquidity, default=None),
+                received_at,
+                minimum_liquidity,
+                freshness,
+                len(eligible),
+            )
+        )
+    return packets
+
+
+def ensure_required_contract_packets(
+    contracts: tuple[str, ...],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, object]]:
+    """Refresh only missing/aged exact contracts, then prove complete coverage."""
+
+    current_time = now or _utc_now()
+    _, _, minimum_liquidity, freshness, database_path, _ = load_config()
+    existing = load_latest_packets_for_contracts(
+        database_path,
+        contracts,
+        now=current_time,
+    )
+    by_contract = {
+        str(packet["contract_address"]).lower(): packet for packet in existing
+    }
+    refresh = []
+    for contract in contracts:
+        packet = by_contract.get(contract)
+        if packet is None or packet["is_stale"] is True:
+            refresh.append(contract)
+            continue
+        received_at = datetime.fromisoformat(str(packet["received_at"]))
+        if current_time - received_at > REQUIRED_PACKET_MAX_AGE:
+            refresh.append(contract)
+    if refresh:
+        pair_age_by_contract = load_pair_creation_fallbacks(
+            database_path,
+            tuple(refresh),
+            now=current_time,
+        )
+        packets = _build_contract_packets(
+            tuple(refresh),
+            minimum_liquidity=minimum_liquidity,
+            freshness=freshness,
+            pair_age_by_contract=pair_age_by_contract,
+        )
+        store_packets(database_path, packets)
+    result = load_latest_packets_for_contracts(
+        database_path,
+        contracts,
+        now=current_time,
+    )
+    covered = {str(packet["contract_address"]).lower() for packet in result}
+    if covered != set(contracts):
+        raise ValueError("Required exact-contract research coverage is incomplete.")
+    return result
 
 
 def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
@@ -453,23 +706,42 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
                 raise
             refresh_governed_asset_universe(path)
             universe = load_governed_asset_universe(path)
-        watchlist = tuple(
+        governed_watchlist = tuple(
             WETH_CONTRACT if asset.token_address is None else asset.token_address
             for asset in universe.assets
         )
+        if len(governed_watchlist) > limit:
+            raise ValueError(
+                "Governed research universe cannot exceed RESEARCH_MAX_CANDIDATES."
+            )
+        watchlist = tuple(dict.fromkeys((*governed_watchlist, USDC_CONTRACT)))
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in watchlist):
         raise ValueError("RESEARCH_WATCHLIST contains an invalid contract address.")
-    if len(watchlist) > limit:
+    if not universe_path and len(watchlist) > limit:
         raise ValueError("RESEARCH_WATCHLIST cannot exceed RESEARCH_MAX_CANDIDATES.")
+    if len(watchlist) > MAX_API_CANDIDATES:
+        raise ValueError("Research watchlist cannot exceed the provider batch limit.")
     return interval, limit, minimum_liquidity, freshness, database_path, watchlist
 
 
 def run_research_cycle() -> int:
     _, limit, minimum_liquidity, freshness, database_path, watchlist = load_config()
     cycle_started_at = _utc_now()
-    profiles = discover_base_contracts(limit, watchlist)
+    profiles = discover_base_contracts(len(watchlist), watchlist)
+    universe_path = os.getenv("RESEARCH_ASSET_UNIVERSE_PATH", "").strip()
+    if universe_path:
+        governed = load_governed_asset_universe(Path(universe_path))
+        pair_age_by_contract = {
+            (asset.token_address or WETH_CONTRACT): asset.oldest_pool_created_at
+            for asset in governed.assets
+        }
+        for profile in profiles:
+            profile["pair_created_at_fallback"] = pair_age_by_contract.get(
+                str(profile["contract_address"])
+            )
     addresses = [str(profile["contract_address"]) for profile in profiles]
-    pairs = fetch_pairs(addresses)
+    with RESEARCH_PROVIDER_LOCK:
+        pairs = fetch_pairs(addresses)
     received_at = _utc_now()
     if received_at < cycle_started_at:
         raise ValueError("Research provider cycle completion precedes its start.")
@@ -480,7 +752,12 @@ def run_research_cycle() -> int:
             contract_address,
             DISCOVERY_QUOTE_CONTRACTS,
         )
-        eligible = eligible_base_pairs(contract_address, pairs, approved_quotes)
+        eligible = eligible_base_pairs(
+            contract_address,
+            pairs,
+            approved_quotes,
+            pair_created_at_fallback=profile.get("pair_created_at_fallback"),
+        )
         packets.append(
             build_packet(
                 profile,
@@ -519,9 +796,18 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
     """Return one public read-only response without implying unbuilt capability."""
     if path in {"/", "/health"}:
         return (200 if STATE["status"] != "failed" else 503, public_health_state())
-    if path in {BASE_RESEARCH_PATH, LEGACY_RESEARCH_PATH}:
+    parsed = urlparse(path)
+    if parsed.path in {BASE_RESEARCH_PATH, LEGACY_RESEARCH_PATH}:
+        if parsed.path == LEGACY_RESEARCH_PATH and parsed.query:
+            raise ValueError("Legacy research route does not accept coverage queries.")
         database_path = Path(
             os.getenv("RESEARCH_DB_PATH", "data/research_packets.sqlite3")
+        )
+        required = required_contracts_from_path(path)
+        packets = (
+            ensure_required_contract_packets(required)
+            if required
+            else load_latest_packets(database_path)
         )
         return (
             200 if STATE["status"] != "failed" else 503,
@@ -531,7 +817,7 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
                 "mode": "observation_only",
                 "execution": "disabled",
                 "generated_at": _utc_now().isoformat(),
-                "packets": load_latest_packets(database_path),
+                "packets": packets,
             },
         )
     unavailable_domains = {
@@ -557,7 +843,32 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        result = public_route_response(self.path)
+        try:
+            result = public_route_response(self.path)
+        except (HTTPError, URLError, TimeoutError):
+            result = (
+                503,
+                {
+                    "service": "lumen-base-research-agent",
+                    "schema_version": RESEARCH_SCHEMA_VERSION,
+                    "mode": "observation_only",
+                    "execution": "disabled",
+                    "status": "provider_unavailable",
+                    "packets": [],
+                },
+            )
+        except ValueError:
+            result = (
+                400,
+                {
+                    "service": "lumen-base-research-agent",
+                    "schema_version": RESEARCH_SCHEMA_VERSION,
+                    "mode": "observation_only",
+                    "execution": "disabled",
+                    "status": "invalid_request",
+                    "packets": [],
+                },
+            )
         if result is None:
             self.send_error(404)
             return
