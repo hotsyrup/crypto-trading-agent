@@ -16,7 +16,6 @@ from urllib.error import HTTPError, URLError
 
 from app.asset_lifecycle import (
     AssetLifecycle,
-    AssetLifecycleState,
     HistoricalGovernedContract,
     LifecycleAsset,
 )
@@ -113,7 +112,7 @@ def _research_signals(
     universe: GovernedAssetUniverse,
     *,
     now: datetime,
-    retained_contracts: frozenset[str] = frozenset(),
+    valuation_contracts: frozenset[str] = frozenset(),
 ) -> tuple[ResearchSignal, ...]:
     if not isinstance(payload, dict) or set(payload) != RESEARCH_ENVELOPE_FIELDS:
         raise ValueError("Research envelope fields are invalid.")
@@ -145,7 +144,7 @@ def _research_signals(
             else ""
         )
         try:
-            if contract in retained_contracts:
+            if contract in valuation_contracts:
                 signal = valuation_signal_from_packet(packet, contract, now=now)
                 if contract == RESEARCH_WETH_ADDRESS:
                     signal = replace(signal, token_address=None)
@@ -367,7 +366,7 @@ def run_live_cycle(
         now=current_time,
         historical_governance=_historical_governance(live_audit_path),
     )
-    retained_contracts = frozenset(
+    held_research_contracts = frozenset(
         (
             RESEARCH_WETH_ADDRESS
             if item.token_address is None
@@ -375,7 +374,6 @@ def run_live_cycle(
             else item.token_address.lower()
         )
         for item in lifecycle_assessment.held_governed
-        if item.state == AssetLifecycleState.RETAINED
     )
     try:
         resolved_research = (
@@ -383,11 +381,16 @@ def run_live_cycle(
             if callable(research_payload)
             else research_payload
         )
-        signals = _research_signals(
+        valuation_signals = _research_signals(
             resolved_research,
             resolved_universe,
             now=current_time,
-            retained_contracts=retained_contracts,
+            valuation_contracts=held_research_contracts,
+        )
+        trade_signals = _research_signals(
+            resolved_research,
+            resolved_universe,
+            now=current_time,
         )
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
         return LiveCycleResult(
@@ -402,7 +405,8 @@ def run_live_cycle(
             quarantined_count=len(lifecycle_assessment.quarantined),
         )
     signal_contracts = {
-        (signal.token_address or NATIVE_ETH_ADDRESS).lower() for signal in signals
+        (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+        for signal in valuation_signals
     }
     missing_held = [
         item
@@ -423,7 +427,7 @@ def run_live_cycle(
         )
     portfolio = _verified_portfolio(
         balances,
-        signals,
+        valuation_signals,
         resolved_universe,
         wallet_address=wallet,
         native_gas_reserve_eth=native_gas_reserve_eth,
@@ -452,7 +456,7 @@ def run_live_cycle(
     execution_signals = _execution_eligible_signals(
         tuple(
             signal
-            for signal in signals
+            for signal in trade_signals
             if (
                 RESEARCH_WETH_ADDRESS
                 if signal.token_address is None

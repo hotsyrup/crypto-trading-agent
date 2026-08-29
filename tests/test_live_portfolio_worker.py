@@ -20,6 +20,7 @@ from app.controlled_live_execution import (
 )
 from app.live_portfolio_worker import (
     CYCLE_NO_FUNDS,
+    CYCLE_NO_SIGNAL,
     CYCLE_POLICY_BLOCKED,
     CYCLE_VALUATION_BLOCKED,
     HealthHandler,
@@ -430,6 +431,79 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertEqual(result.held_covered, 0)
         self.assertFalse(self.risk.exists())
         self.assertEqual(runtime.requests, [])
+
+    def test_held_candidate_uses_exact_price_without_requiring_entry_liquidity(self) -> None:
+        pair = {
+            "chainId": "base",
+            "dexId": "aerodrome",
+            "pairAddress": "0x" + "5" * 40,
+            "baseToken": {
+                "address": AERO_ADDRESS,
+                "name": "Aerodrome",
+                "symbol": "AERO",
+            },
+            "quoteToken": {
+                "address": BASE_USDC_ADDRESS,
+                "name": "USD Coin",
+                "symbol": "USDC",
+            },
+            "priceUsd": "0.50",
+            "liquidity": {"usd": "50000"},
+            "volume": {"h24": "200000", "h6": "50000"},
+            "priceChange": {"h24": "8", "h6": "3"},
+            "txns": {"h24": {"buys": 120, "sells": 90}},
+            "pairCreatedAt": 1704067200000,
+            "marketCap": "450000000",
+            "fdv": "500000000",
+            "boosts": {"active": 0},
+        }
+        packet = build_packet(
+            {
+                "contract_address": AERO_ADDRESS,
+                "discovery_source": "configured_watchlist",
+                "profile_url": None,
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            pair,
+            NOW - timedelta(seconds=10),
+            Decimal("100000"),
+            5,
+            1,
+        )
+        packet["is_stale"] = False
+        payload = research_payload()
+        payload["packets"] = [packet]
+
+        for amount in (Decimal("1"), Decimal("40")):
+            with self.subTest(amount=amount):
+                runtime = Runtime(
+                    (
+                        OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                        OnchainTokenBalance(AERO_ADDRESS, amount, 18),
+                    )
+                )
+                suffix = str(amount)
+                result = run_live_cycle(
+                    runtime=runtime,
+                    research_payload=payload,
+                    universe=universe(),
+                    authorized_capital_usdc=Decimal("500"),
+                    decision_journal_path=Path(self.temp_dir.name)
+                    / f"decisions-{suffix}.jsonl",
+                    live_audit_path=Path(self.temp_dir.name) / f"audit-{suffix}.jsonl",
+                    risk_journal_path=Path(self.temp_dir.name) / f"risk-{suffix}.jsonl",
+                    now=NOW,
+                )
+
+                self.assertEqual(result.status, CYCLE_NO_SIGNAL, result.reason)
+                self.assertEqual(
+                    result.portfolio_value_usdc,
+                    Decimal("25") + amount * Decimal("0.50"),
+                )
+                self.assertEqual(result.held_required, 1)
+                self.assertEqual(result.held_covered, 1)
+                self.assertEqual(runtime.requests, [])
 
     def test_historical_live_journal_bootstraps_retained_contract_after_restart(self) -> None:
         reserve_live_execution(
