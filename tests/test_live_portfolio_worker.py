@@ -21,7 +21,6 @@ from app.controlled_live_execution import (
 from app.live_portfolio_worker import (
     CYCLE_NO_FUNDS,
     CYCLE_POLICY_BLOCKED,
-    CYCLE_QUARANTINED,
     CYCLE_VALUATION_BLOCKED,
     HealthHandler,
     LiveCycleResult,
@@ -530,9 +529,9 @@ class LivePortfolioWorkerTests(unittest.TestCase):
             research_payload=exact_research,
             universe=universe(),
             authorized_capital_usdc=Decimal("500"),
-            decision_journal_path=self.decisions,
+            decision_journal_path=Path(self.temp_dir.name) / "first-decisions.jsonl",
             live_audit_path=self.audit,
-            risk_journal_path=self.risk,
+            risk_journal_path=Path(self.temp_dir.name) / "first-risk.jsonl",
             lifecycle_registry_path=registry,
             now=NOW,
             live_config=load_live_trading_config(),
@@ -552,7 +551,8 @@ class LivePortfolioWorkerTests(unittest.TestCase):
             executor_config=config,
         )
 
-        self.assertEqual(first.status, CYCLE_QUARANTINED)
+        self.assertEqual(first.status, CYCLE_POLICY_BLOCKED, first.reason)
+        self.assertEqual(first.quarantined_count, 1)
         self.assertEqual(second.status, CYCLE_POLICY_BLOCKED, second.reason)
         self.assertEqual(second.portfolio_value_usdc, Decimal("35.730"))
         self.assertIn(CHIP_ADDRESS, requested[-1])
@@ -616,10 +616,10 @@ class LivePortfolioWorkerTests(unittest.TestCase):
             now=NOW,
         )
 
-        self.assertEqual(result.status, CYCLE_QUARANTINED)
+        self.assertEqual(result.status, CYCLE_POLICY_BLOCKED, result.reason)
         self.assertEqual(result.quarantined_count, 1)
         self.assertEqual(result.portfolio_value_usdc, Decimal("25"))
-        self.assertFalse(self.risk.exists())
+        self.assertTrue(self.risk.exists())
         self.assertEqual(runtime.requests, [])
 
     def test_health_stays_200_when_trading_readiness_is_blocked(self) -> None:
@@ -678,8 +678,12 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertTrue(diagnostic["message"].strip())
 
     def test_armed_cycle_submits_at_most_one_governed_trade(self) -> None:
+        unsolicited_contract = "0x" + "7" * 40
         runtime = Runtime(
-            (OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("500"), 6),)
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("500"), 6),
+                OnchainTokenBalance(unsolicited_contract, Decimal("1000000"), 18),
+            )
         )
 
         result = self.cycle(
@@ -693,9 +697,11 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, STATUS_CONFIRMED)
+        self.assertEqual(result.quarantined_count, 1)
         self.assertEqual(len(runtime.requests), 1)
         self.assertEqual(runtime.requests[0].from_token, BASE_USDC_ADDRESS)
         self.assertEqual(runtime.requests[0].to_token, AERO_ADDRESS)
+        self.assertNotEqual(runtime.requests[0].to_token, unsolicited_contract)
         self.assertEqual(runtime.requests[0].notional_usdc, Decimal("20"))
 
     def test_armed_cycle_skips_stronger_signal_that_fails_relative_liquidity(self) -> None:

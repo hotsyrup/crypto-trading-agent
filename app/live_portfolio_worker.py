@@ -442,18 +442,6 @@ def run_live_cycle(
             held_covered=len(lifecycle_assessment.held_governed),
             quarantined_count=len(lifecycle_assessment.quarantined),
         )
-    if lifecycle_assessment.quarantined:
-        return LiveCycleResult(
-            CYCLE_QUARANTINED,
-            wallet,
-            runtime.network_id,
-            portfolio.total_value_usdc,
-            "Unknown or contradictory exact-contract holdings are quarantined.",
-            trading_readiness="blocked",
-            held_required=len(lifecycle_assessment.held_governed),
-            held_covered=len(lifecycle_assessment.held_governed),
-            quarantined_count=len(lifecycle_assessment.quarantined),
-        )
     risk = record_live_portfolio_value(
         portfolio.total_value_usdc,
         authorized_capital_usdc=authorized_capital_usdc,
@@ -484,6 +472,7 @@ def run_live_cycle(
             trading_readiness="blocked",
             held_required=len(lifecycle_assessment.held_governed),
             held_covered=len(lifecycle_assessment.held_governed),
+            quarantined_count=len(lifecycle_assessment.quarantined),
         )
     selected = _ordered_signals(execution_signals, portfolio, resolved_universe)[0]
     result: ControlledLiveResult = execute_research_portfolio_signal(
