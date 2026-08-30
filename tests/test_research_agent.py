@@ -74,6 +74,20 @@ class ResearchAgentTests(unittest.TestCase):
 
     @patch("app.research_agent.time.sleep")
     @patch("app.research_agent.urlopen")
+    def test_provider_rate_limit_uses_bounded_window_backoff(self, urlopen, sleep) -> None:
+        response = BytesIO(b'{"ok": true}')
+        response.headers = {}
+        urlopen.side_effect = [
+            HTTPError("https://api.dexscreener.com/test", 429, "busy", {}, None),
+            HTTPError("https://api.dexscreener.com/test", 429, "busy", {}, None),
+            response,
+        ]
+
+        self.assertEqual(get_json("/test"), {"ok": True})
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 20])
+
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.urlopen")
     def test_provider_permanent_client_error_does_not_retry(self, urlopen, sleep) -> None:
         urlopen.side_effect = HTTPError(
             "https://api.dexscreener.com/test", 404, "missing", {}, None
@@ -192,8 +206,11 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
         self.assertEqual(watchlist[-1], "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
 
+    @patch("app.research_agent.time.sleep")
     @patch("app.research_agent.get_json")
-    def test_fetch_pairs_queries_each_contract_to_avoid_provider_truncation(self, get_json) -> None:
+    def test_fetch_pairs_queries_each_contract_to_avoid_provider_truncation(
+        self, get_json, sleep
+    ) -> None:
         get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
         second = "0x0000000000000000000000000000000000000002"
         pairs = fetch_pairs([ADDRESS, second])
@@ -202,6 +219,7 @@ class ResearchAgentTests(unittest.TestCase):
             [call.args[0] for call in get_json.call_args_list],
             [f"/tokens/v1/base/{ADDRESS}", f"/tokens/v1/base/{second}"],
         )
+        sleep.assert_called_once_with(1.25)
 
     @patch("app.research_agent.store_packets")
     @patch("app.research_agent.fetch_pairs")

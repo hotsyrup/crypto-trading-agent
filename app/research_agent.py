@@ -32,6 +32,7 @@ MAX_API_CANDIDATES = 30
 MAX_REQUIRED_CONTRACTS = 50
 REQUIRED_PACKET_MAX_AGE = timedelta(seconds=90)
 MAX_PROVIDER_ATTEMPTS = 3
+PROVIDER_REQUEST_SPACING_SECONDS = 1.25
 RESEARCH_SCHEMA_VERSION = 2
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
 LEGACY_RESEARCH_PATH = "/research/latest"
@@ -98,6 +99,14 @@ def get_json(path: str) -> object:
         except HTTPError as error:
             if error.code not in RETRYABLE_HTTP_STATUS or attempt == MAX_PROVIDER_ATTEMPTS:
                 raise
+            if error.code == 429:
+                retry_after = error.headers.get("Retry-After") if error.headers else None
+                try:
+                    delay = int(retry_after) if retry_after is not None else 10 * attempt
+                except ValueError:
+                    delay = 10 * attempt
+                time.sleep(max(1, min(delay, 60)))
+                continue
         except URLError:
             if attempt == MAX_PROVIDER_ATTEMPTS:
                 raise
@@ -161,11 +170,13 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
     pairs: list[dict[str, object]] = []
-    for address in addresses:
+    for index, address in enumerate(addresses):
         payload = get_json(f"/tokens/v1/base/{address}")
         if not isinstance(payload, list):
             raise ValueError("DEX Screener tokens response must be a list.")
         pairs.extend(pair for pair in payload if isinstance(pair, dict))
+        if index + 1 < len(addresses):
+            time.sleep(PROVIDER_REQUEST_SPACING_SECONDS)
     return pairs
 
 
