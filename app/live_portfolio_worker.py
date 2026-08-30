@@ -543,6 +543,7 @@ def run_live_cycle(
             resolved_universe,
             now=research_evaluated_at,
         )
+        current_time = research_evaluated_at
     except (
         HTTPError,
         URLError,
