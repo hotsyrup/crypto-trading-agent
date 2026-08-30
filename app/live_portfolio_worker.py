@@ -860,6 +860,7 @@ STATE: dict[str, object] = {
     "last_cycle_at": None,
     "last_error": None,
     "last_error_message": None,
+    "last_block_reason": None,
     "correlation_id": None,
     "held_required": 0,
     "held_covered": 0,
@@ -894,6 +895,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "last_cycle_at": STATE["last_cycle_at"],
                 "last_error": STATE["last_error"],
                 "last_error_message": STATE["last_error_message"],
+                "last_block_reason": STATE["last_block_reason"],
                 "correlation_id": STATE["correlation_id"],
                 "held_required": STATE["held_required"],
                 "held_covered": STATE["held_covered"],
@@ -1003,6 +1005,11 @@ def _record_cycle_result(
         last_cycle_at=cycle_time.isoformat(),
         last_error=None,
         last_error_message=None,
+        last_block_reason=(
+            _safe_error_message(ValueError(result.reason))
+            if result.trading_readiness == "blocked"
+            else None
+        ),
         correlation_id=correlation_id,
         held_required=result.held_required,
         held_covered=result.held_covered,
@@ -1021,6 +1028,11 @@ def _record_cycle_result(
                 "held_covered": result.held_covered,
                 "quarantined_count": result.quarantined_count,
                 "transaction_submitted": result.transaction_hash is not None,
+                "block_reason": (
+                    _safe_error_message(ValueError(result.reason))
+                    if result.trading_readiness == "blocked"
+                    else None
+                ),
             }
         ),
         flush=True,
@@ -1042,6 +1054,7 @@ def _record_cycle_failure(
         last_cycle_at=cycle_time.isoformat(),
         last_error=type(error).__name__,
         last_error_message=message,
+        last_block_reason=message,
         correlation_id=correlation_id,
     )
     print(

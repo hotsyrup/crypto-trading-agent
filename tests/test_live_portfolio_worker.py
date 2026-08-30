@@ -741,6 +741,7 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertEqual(payload["operational_status"], "operational")
         self.assertEqual(payload["trading_readiness"], "blocked")
         self.assertEqual(payload["cycle_status"], "valuation_blocked")
+        self.assertEqual(payload["last_block_reason"], "blocked")
         self.assertEqual(payload["held_required"], 2)
         self.assertEqual(payload["held_covered"], 1)
 

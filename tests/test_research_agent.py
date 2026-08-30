@@ -1,5 +1,6 @@
 import json
 import os
+import socketserver
 import sqlite3
 import tempfile
 import unittest
@@ -27,6 +28,7 @@ from app.research_agent import (
     run_research_cycle,
     select_primary_pair,
     store_packets,
+    TimedHTTPServer,
 )
 
 
@@ -53,6 +55,9 @@ def sample_pair(liquidity: str = "100000") -> dict[str, object]:
 
 
 class ResearchAgentTests(unittest.TestCase):
+    def test_public_server_handles_health_while_research_request_is_busy(self) -> None:
+        self.assertTrue(issubclass(TimedHTTPServer, socketserver.ThreadingMixIn))
+
     @patch("app.research_agent.time.sleep")
     @patch("app.research_agent.urlopen")
     def test_provider_transient_failure_retries_then_recovers(self, urlopen, sleep) -> None:

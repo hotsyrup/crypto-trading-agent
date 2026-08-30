@@ -16,7 +16,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.error import HTTPError, URLError
@@ -886,7 +886,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         return
 
 
-class TimedHTTPServer(HTTPServer):
+class TimedHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
     request_timeout_seconds = 5.0
 
     def get_request(self):
