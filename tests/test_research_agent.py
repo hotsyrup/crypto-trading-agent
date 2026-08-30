@@ -219,7 +219,7 @@ class ResearchAgentTests(unittest.TestCase):
             [call.args[0] for call in get_json.call_args_list],
             [f"/tokens/v1/base/{ADDRESS}", f"/tokens/v1/base/{second}"],
         )
-        sleep.assert_called_once_with(1.25)
+        sleep.assert_called_once_with(3.25)
 
     @patch("app.research_agent.store_packets")
     @patch("app.research_agent.fetch_pairs")
