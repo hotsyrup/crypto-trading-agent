@@ -4,6 +4,8 @@ import json
 import os
 import tempfile
 import time
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -30,6 +32,18 @@ WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 MAX_CANDIDATES = 90
 TOKEN_BATCH_SIZE = 30
 GECKOTERMINAL_REQUEST_INTERVAL_SECONDS = 6.1
+
+
+@dataclass(frozen=True)
+class UniverseRefreshAssessment:
+    snapshot: dict[str, object]
+    diagnostics: dict[str, object]
+
+
+class UniverseRefreshError(ValueError):
+    def __init__(self, message: str, diagnostics: dict[str, object]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def _decimal(value: object) -> Decimal:
@@ -60,15 +74,15 @@ def _pool_created_at(pool: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def build_cross_verified_snapshot(
+def assess_cross_verified_snapshot(
     *,
     markets: list[object],
     coins: list[object],
     token_details: dict[str, object],
     pools_by_address: dict[str, list[object]],
     observed_at: datetime,
-) -> dict[str, object]:
-    """Cross-check market-cap rank against exact Base onchain pool evidence."""
+) -> UniverseRefreshAssessment:
+    """Return a strictly qualified universe plus attributable rejection evidence."""
 
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("Universe observation time must include a timezone.")
@@ -94,54 +108,115 @@ def build_cross_verified_snapshot(
     selected: list[dict[str, object]] = []
     selected_symbols: set[str] = set()
     selected_addresses: set[str] = set()
+    rejected_assets: list[dict[str, object]] = []
+    rejection_counts: Counter[str] = Counter()
+    candidates_seen = 0
+    eligible_beyond_capacity = 0
     for market in markets:
-        if len(selected) >= MAX_TRADABLE_ASSETS:
-            break
         if not isinstance(market, dict):
+            rejection_counts["invalid_market_record"] += 1
+            rejected_assets.append(
+                {
+                    "coin_id": None,
+                    "symbol": None,
+                    "token_address": None,
+                    "reasons": ["invalid_market_record"],
+                }
+            )
             continue
+        candidates_seen += 1
+        coin_id = str(market.get("id", ""))
+        market_symbol = str(market.get("symbol", "")).upper() or None
         address = base_addresses.get(str(market.get("id", "")))
-        if not address or address == BASE_USDC_ADDRESS:
+        reasons: list[str] = []
+        if not address:
+            reasons.append("missing_base_contract")
+        elif address == BASE_USDC_ADDRESS:
+            reasons.append("official_usdc_excluded")
+        if reasons:
+            rejection_counts.update(reasons)
+            rejected_assets.append(
+                {
+                    "coin_id": coin_id or None,
+                    "symbol": market_symbol,
+                    "token_address": address,
+                    "reasons": reasons,
+                }
+            )
             continue
         details = normalized_details.get(address)
         if not isinstance(details, dict):
+            reasons.append("missing_token_details")
+            rejection_counts.update(reasons)
+            rejected_assets.append(
+                {
+                    "coin_id": coin_id or None,
+                    "symbol": market_symbol,
+                    "token_address": address,
+                    "reasons": reasons,
+                }
+            )
             continue
         if str(details.get("address", "")).lower() != address:
-            continue
+            reasons.append("token_address_mismatch")
         liquidity = _decimal(details.get("total_reserve_in_usd"))
         volume_data = details.get("volume_usd")
         volume = _decimal(
             volume_data.get("h24") if isinstance(volume_data, dict) else None
         )
         market_cap = _decimal(market.get("market_cap"))
-        if (
-            market_cap <= 0
-            or liquidity < MINIMUM_LIQUIDITY_USD
-            or volume < MINIMUM_DAILY_VOLUME_USD
-        ):
-            continue
+        if market_cap <= 0:
+            reasons.append("missing_market_cap")
+        if liquidity < MINIMUM_LIQUIDITY_USD:
+            reasons.append("liquidity_below_minimum")
+        if volume < MINIMUM_DAILY_VOLUME_USD:
+            reasons.append("volume_below_minimum")
         pool_times = [
             created
             for pool in normalized_pools.get(address, [])
             if (created := _pool_created_at(pool)) is not None
         ]
-        if not pool_times:
-            continue
-        oldest_pool = min(pool_times)
-        if observed_at - oldest_pool < MINIMUM_POOL_AGE:
-            continue
+        if (
+            not pool_times
+            and liquidity >= MINIMUM_LIQUIDITY_USD
+            and volume >= MINIMUM_DAILY_VOLUME_USD
+        ):
+            reasons.append("missing_pool_age")
+            oldest_pool = None
+        elif pool_times:
+            oldest_pool = min(pool_times)
+            if observed_at - oldest_pool < MINIMUM_POOL_AGE:
+                reasons.append("pool_too_young")
+        else:
+            oldest_pool = None
         decimals = details.get("decimals")
         if type(decimals) is not int or not 0 <= decimals <= 36:
-            continue
+            reasons.append("invalid_decimals")
         native_eth = address == WETH_ADDRESS
         symbol = "ETH" if native_eth else str(details.get("symbol", "")).upper()
         name = "Ether" if native_eth else str(details.get("name", "")).strip()
         governed_address = None if native_eth else address
-        if (
-            not symbol
-            or not name
-            or symbol in selected_symbols
-            or address in selected_addresses
-        ):
+        if not symbol:
+            reasons.append("missing_symbol")
+        if not name:
+            reasons.append("missing_name")
+        if symbol in selected_symbols:
+            reasons.append("duplicate_symbol")
+        if address in selected_addresses:
+            reasons.append("duplicate_contract")
+        if reasons:
+            rejection_counts.update(reasons)
+            rejected_assets.append(
+                {
+                    "coin_id": coin_id or None,
+                    "symbol": symbol or market_symbol,
+                    "token_address": address,
+                    "reasons": reasons,
+                }
+            )
+            continue
+        if len(selected) >= MAX_TRADABLE_ASSETS:
+            eligible_beyond_capacity += 1
             continue
         selected_symbols.add(symbol)
         selected_addresses.add(address)
@@ -158,11 +233,27 @@ def build_cross_verified_snapshot(
                 "oldest_pool_created_at": oldest_pool.isoformat(),
             }
         )
-    if len(selected) != MAX_TRADABLE_ASSETS:
-        raise ValueError(
-            f"Only {len(selected)} cross-verified Base assets passed; 25 are required."
+    diagnostics: dict[str, object] = {
+        "schema_version": 1,
+        "observed_at": observed_at.isoformat(),
+        "candidates_seen": candidates_seen,
+        "accepted_count": len(selected),
+        "maximum_asset_count": MAX_TRADABLE_ASSETS,
+        "eligible_beyond_capacity": eligible_beyond_capacity,
+        "strict_thresholds": {
+            "minimum_liquidity_usd": str(MINIMUM_LIQUIDITY_USD),
+            "minimum_daily_volume_usd": str(MINIMUM_DAILY_VOLUME_USD),
+            "minimum_pool_age_days": MINIMUM_POOL_AGE.days,
+        },
+        "rejection_counts": dict(sorted(rejection_counts.items())),
+        "rejected_assets": rejected_assets,
+    }
+    if not selected:
+        raise UniverseRefreshError(
+            "No cross-verified Base assets passed the strict universe policy.",
+            diagnostics,
         )
-    return {
+    snapshot = {
         "schema_version": 1,
         "network": BASE_MAINNET_NETWORK,
         "chain_id": BASE_MAINNET_CHAIN_ID,
@@ -173,6 +264,26 @@ def build_cross_verified_snapshot(
         ),
         "assets": selected,
     }
+    return UniverseRefreshAssessment(snapshot=snapshot, diagnostics=diagnostics)
+
+
+def build_cross_verified_snapshot(
+    *,
+    markets: list[object],
+    coins: list[object],
+    token_details: dict[str, object],
+    pools_by_address: dict[str, list[object]],
+    observed_at: datetime,
+) -> dict[str, object]:
+    """Compatibility interface returning only the strictly qualified snapshot."""
+
+    return assess_cross_verified_snapshot(
+        markets=markets,
+        coins=coins,
+        token_details=token_details,
+        pools_by_address=pools_by_address,
+        observed_at=observed_at,
+    ).snapshot
 
 
 def _get_json(url: str) -> object:
@@ -202,8 +313,55 @@ def _data_list(payload: object, label: str) -> list[object]:
     raise ValueError(f"{label} response must contain a list.")
 
 
+def _write_json_atomically(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            temporary_path = Path(handle.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _diagnostics_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}_diagnostics.json")
+
+
+def _log_assessment(diagnostics: dict[str, object], *, status: str) -> None:
+    rejected = diagnostics.get("rejected_assets", [])
+    print(
+        json.dumps(
+            {
+                "event": "asset_universe_refresh_assessed",
+                "status": status,
+                "observed_at": diagnostics.get("observed_at"),
+                "accepted_count": diagnostics.get("accepted_count"),
+                "maximum_asset_count": diagnostics.get("maximum_asset_count"),
+                "candidates_seen": diagnostics.get("candidates_seen"),
+                "rejection_counts": diagnostics.get("rejection_counts"),
+                "rejected_assets": rejected[:25] if isinstance(rejected, list) else [],
+                "rejected_assets_truncated": (
+                    isinstance(rejected, list) and len(rejected) > 25
+                ),
+            }
+        ),
+        flush=True,
+    )
+
+
 def refresh_governed_asset_universe(path: Path) -> dict[str, object]:
-    """Refresh the 25-asset snapshot without wallet or execution access."""
+    """Refresh up to 25 strictly qualified assets without execution access."""
 
     markets_query = urlencode(
         {
@@ -282,32 +440,22 @@ def refresh_governed_asset_universe(path: Path) -> dict[str, object]:
         )
         pools_by_address[address] = _data_list(payload, "GeckoTerminal pools")
 
-    snapshot = build_cross_verified_snapshot(
-        markets=markets,
-        coins=coins,
-        token_details=token_details,
-        pools_by_address=pools_by_address,
-        observed_at=datetime.now(timezone.utc),
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            json.dump(snapshot, handle, sort_keys=True, indent=2)
-            handle.write("\n")
-            temporary_path = Path(handle.name)
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
-    return snapshot
+        assessment = assess_cross_verified_snapshot(
+            markets=markets,
+            coins=coins,
+            token_details=token_details,
+            pools_by_address=pools_by_address,
+            observed_at=datetime.now(timezone.utc),
+        )
+    except UniverseRefreshError as error:
+        _write_json_atomically(_diagnostics_path(path), error.diagnostics)
+        _log_assessment(error.diagnostics, status="rejected")
+        raise
+    _write_json_atomically(path, assessment.snapshot)
+    _write_json_atomically(_diagnostics_path(path), assessment.diagnostics)
+    _log_assessment(assessment.diagnostics, status="refreshed")
+    return assessment.snapshot
 
 
 def main() -> None:

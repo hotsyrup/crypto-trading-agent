@@ -494,9 +494,17 @@ class LivePortfolioWorkerTests(unittest.TestCase):
                     live_audit_path=Path(self.temp_dir.name) / f"audit-{suffix}.jsonl",
                     risk_journal_path=Path(self.temp_dir.name) / f"risk-{suffix}.jsonl",
                     now=NOW,
+                    live_config=replace(load_live_trading_config(), enabled=True),
+                    executor_config=ExecutorConfig(
+                        mode=EXECUTOR_MODE_CONTROLLED_LIVE,
+                        kill_switch_state=KILL_SWITCH_ARMED,
+                        max_data_age_seconds=120,
+                        max_future_skew_seconds=30,
+                    ),
                 )
 
                 self.assertEqual(result.status, CYCLE_NO_SIGNAL, result.reason)
+                self.assertEqual(result.trading_readiness, "ready")
                 self.assertEqual(
                     result.portfolio_value_usdc,
                     Decimal("25") + amount * Decimal("0.50"),

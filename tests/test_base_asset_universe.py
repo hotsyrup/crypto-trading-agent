@@ -88,19 +88,26 @@ class GovernedAssetUniverseTests(unittest.TestCase):
                 with self.assertRaises(AssetUniverseError):
                     load_governed_asset_universe(self.path, now=NOW)
 
-    def test_thin_assets_invalidate_the_whole_governed_snapshot(self) -> None:
+    def test_thin_asset_in_a_persisted_snapshot_fails_closed(self) -> None:
         assets = [asset(rank) for rank in range(1, 26)]
         assets[3] = asset(4, liquidity="99999")
         assets[4] = asset(5, volume="99999")
         self.write(snapshot(assets=assets))
 
-        with self.assertRaisesRegex(AssetUniverseError, "exactly 25"):
+        with self.assertRaisesRegex(AssetUniverseError, "live-eligible"):
             load_governed_asset_universe(self.path, now=NOW)
 
-    def test_fewer_than_25_assets_fail_closed(self) -> None:
+    def test_strictly_qualified_universe_may_contain_fewer_than_25_assets(self) -> None:
         self.write(snapshot(assets=[asset(rank) for rank in range(1, 25)]))
 
-        with self.assertRaisesRegex(AssetUniverseError, "exactly 25"):
+        universe = load_governed_asset_universe(self.path, now=NOW)
+
+        self.assertEqual(len(universe.assets), 24)
+
+    def test_empty_universe_fails_closed(self) -> None:
+        self.write(snapshot(assets=[]))
+
+        with self.assertRaisesRegex(AssetUniverseError, "between 1 and 25"):
             load_governed_asset_universe(self.path, now=NOW)
 
     def test_spoofed_symbol_duplicate_contract_and_native_alias_fail_closed(self) -> None:

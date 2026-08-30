@@ -41,7 +41,10 @@ hard limits or expand the route.
 - Approval transactions: exact-amount Permit2 only for ERC-20 input; native ETH
   needs no approval. Wrong or unlimited approvals fail closed.
 
-The eligible universe contains exactly 25 assets and expires after 24 hours.
+The eligible universe contains up to 25 individually cross-verified assets and
+expires after 24 hours. A smaller qualified set narrows execution authority; it
+does not relax contract identity, liquidity, volume, pool-age, or freshness
+requirements. An empty or malformed universe fails closed.
 The refresh job combines CoinGecko's Base ecosystem market-cap ordering with
 GeckoTerminal's exact-contract metadata, liquidity, 24-hour volume, and oldest
 pool date. Assets below $100,000 liquidity, below $100,000 daily volume, or

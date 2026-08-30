@@ -4,7 +4,11 @@ from io import BytesIO
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from app.base_asset_universe_refresh import _get_json, build_cross_verified_snapshot
+from app.base_asset_universe_refresh import (
+    _get_json,
+    assess_cross_verified_snapshot,
+    build_cross_verified_snapshot,
+)
 
 
 NOW = datetime(2026, 8, 24, 6, 0, tzinfo=timezone.utc)
@@ -82,6 +86,86 @@ class AssetUniverseRefreshTests(unittest.TestCase):
             [item["rank"] for item in snapshot["assets"]],
             list(range(1, 26)),
         )
+
+    def test_partial_strictly_qualified_universe_is_accepted_and_diagnosed(self) -> None:
+        markets = []
+        coins = []
+        token_details = {}
+        pools_by_address = {}
+        for number in range(1, 26):
+            coin_id = f"coin-{number}"
+            address = WETH if number == 1 else f"0x{number:040x}"
+            markets.append(
+                {
+                    "id": coin_id,
+                    "name": "Wrapped Ether" if number == 1 else f"Token {number}",
+                    "symbol": "weth" if number == 1 else f"token{number}",
+                    "market_cap": 1_000_000_000 - number,
+                }
+            )
+            coins.append({"id": coin_id, "platforms": {"base": address}})
+            if number != 5:
+                token_details[address] = {
+                    "address": address,
+                    "name": "Wrapped Ether" if number == 1 else f"Token {number}",
+                    "symbol": "WETH" if number == 1 else f"TOKEN{number}",
+                    "decimals": 18,
+                    "total_reserve_in_usd": "99999" if number == 2 else "1000000",
+                    "volume_usd": {
+                        "h24": "99999" if number == 3 else "500000"
+                    },
+                }
+            if number not in {2, 3, 5}:
+                pools_by_address[address] = [
+                    {
+                        "pool_created_at": (
+                            NOW
+                            - (
+                                timedelta(days=10)
+                                if number == 4
+                                else timedelta(days=365)
+                            )
+                        ).isoformat()
+                    }
+                ]
+
+        assessment = assess_cross_verified_snapshot(
+            markets=markets,
+            coins=coins,
+            token_details=token_details,
+            pools_by_address=pools_by_address,
+            observed_at=NOW,
+        )
+
+        self.assertEqual(len(assessment.snapshot["assets"]), 21)
+        self.assertEqual(assessment.diagnostics["accepted_count"], 21)
+        self.assertEqual(
+            assessment.diagnostics["rejection_counts"],
+            {
+                "liquidity_below_minimum": 1,
+                "missing_token_details": 1,
+                "pool_too_young": 1,
+                "volume_below_minimum": 1,
+            },
+        )
+        rejected = {
+            item["coin_id"]: item["reasons"]
+            for item in assessment.diagnostics["rejected_assets"]
+        }
+        self.assertEqual(rejected["coin-2"], ["liquidity_below_minimum"])
+        self.assertEqual(rejected["coin-3"], ["volume_below_minimum"])
+        self.assertEqual(rejected["coin-4"], ["pool_too_young"])
+        self.assertEqual(rejected["coin-5"], ["missing_token_details"])
+
+    def test_empty_qualified_universe_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No cross-verified Base assets"):
+            assess_cross_verified_snapshot(
+                markets=[{"id": "coin-1", "market_cap": 1000000}],
+                coins=[{"id": "coin-1", "platforms": {"base": WETH}}],
+                token_details={},
+                pools_by_address={},
+                observed_at=NOW,
+            )
 
 
 if __name__ == "__main__":

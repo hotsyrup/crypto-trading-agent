@@ -71,6 +71,8 @@ from app.strategy_profile import (
 )
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
+    EXECUTOR_MODE_CONTROLLED_LIVE,
+    KILL_SWITCH_ARMED,
     MAX_TRADING_CAPITAL_USDC,
     ExecutorConfig,
     load_executor_config,
@@ -775,7 +777,13 @@ def run_live_cycle(
             runtime.network_id,
             portfolio.total_value_usdc,
             "No fresh governed research signal passes execution liquidity policy.",
-            trading_readiness="blocked",
+            trading_readiness=(
+                "ready"
+                if live_config.enabled
+                and executor_config.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+                and executor_config.kill_switch_state == KILL_SWITCH_ARMED
+                else "blocked"
+            ),
             held_required=len(lifecycle_assessment.held_governed),
             held_covered=len(lifecycle_assessment.held_governed),
             quarantined_count=len(lifecycle_assessment.quarantined),
