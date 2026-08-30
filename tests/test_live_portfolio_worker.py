@@ -446,6 +446,35 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertFalse(self.risk.exists())
         self.assertEqual(runtime.requests, [])
 
+    def test_research_exception_is_reported_without_losing_fail_closed_state(self) -> None:
+        runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+
+        def unavailable(_contracts):
+            raise TimeoutError("provider deadline exceeded")
+
+        result = run_live_cycle(
+            runtime=runtime,
+            research_payload=unavailable,
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+        )
+
+        self.assertEqual(result.status, CYCLE_VALUATION_BLOCKED)
+        self.assertEqual(
+            result.reason,
+            "Research evidence blocked: provider deadline exceeded",
+        )
+        self.assertEqual(runtime.requests, [])
+
     def test_held_candidate_uses_exact_price_without_requiring_entry_liquidity(self) -> None:
         pair = {
             "chainId": "base",

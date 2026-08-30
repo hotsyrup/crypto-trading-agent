@@ -520,13 +520,20 @@ def run_live_cycle(
             resolved_universe,
             now=current_time,
         )
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as error:
         return LiveCycleResult(
             CYCLE_VALUATION_BLOCKED,
             wallet,
             runtime.network_id,
             Decimal("0"),
-            "Fresh exact-contract research evidence is unavailable or invalid.",
+            f"Research evidence blocked: {_safe_error_message(error)}",
             trading_readiness="blocked",
             held_required=len(lifecycle_assessment.held_governed),
             held_covered=0,
