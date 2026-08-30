@@ -30,6 +30,7 @@ from app.live_portfolio_worker import (
     _record_cycle_failure,
     _record_cycle_result,
     _cycle_sleep_seconds,
+    _parallel_strategy_profiles,
     _research_receipt_time,
     _verified_portfolio,
     run_live_cycle,
@@ -153,6 +154,17 @@ class Runtime:
 
 
 class LivePortfolioWorkerTests(unittest.TestCase):
+    def test_parallel_shadow_does_not_duplicate_active_medium_high_profile(self) -> None:
+        self.assertEqual(
+            _parallel_strategy_profiles(MEDIUM_HIGH_PROFILE, True),
+            ("cautious_v1",),
+        )
+        self.assertEqual(
+            _parallel_strategy_profiles("cautious_v1", True),
+            ("cautious_v1", MEDIUM_HIGH_PROFILE),
+        )
+        self.assertEqual(_parallel_strategy_profiles(MEDIUM_HIGH_PROFILE, False), ())
+
     def test_research_receipt_time_includes_remote_request_duration(self) -> None:
         self.assertEqual(
             _research_receipt_time(NOW, 96.25),

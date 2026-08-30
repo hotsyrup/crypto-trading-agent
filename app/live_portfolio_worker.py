@@ -189,6 +189,16 @@ def _research_receipt_time(cycle_time: datetime, elapsed_seconds: float) -> date
     return cycle_time + timedelta(seconds=elapsed_seconds)
 
 
+def _parallel_strategy_profiles(active_profile: str, enabled: bool) -> tuple[str, ...]:
+    if not enabled:
+        return ()
+    if active_profile == CAUTIOUS_PROFILE:
+        return (CAUTIOUS_PROFILE, MEDIUM_HIGH_PROFILE)
+    if active_profile == MEDIUM_HIGH_PROFILE:
+        return (CAUTIOUS_PROFILE,)
+    raise ValueError("Active strategy profile is invalid.")
+
+
 def _verified_portfolio(
     balances: tuple[OnchainTokenBalance, ...],
     signals: tuple[ResearchSignal, ...],
@@ -702,58 +712,61 @@ def run_live_cycle(
                 )
         except (OSError, StrategyProfileError, ValueError) as error:
             raise ValueError(f"Strategy journal update failed: {error}") from error
-    if parallel_shadow:
+    parallel_profiles = _parallel_strategy_profiles(strategy_profile, parallel_shadow)
+    if parallel_profiles:
         positions = {
             (item.symbol, item.token_address): item for item in portfolio.positions
         }
         try:
-            for candidate in candidate_signals:
-                if not strategy_packet_is_new(candidate, CAUTIOUS_PROFILE):
-                    continue
-                append_strategy_decision(
-                    signal=candidate,
-                    decision=evaluate_cautious(
-                        candidate,
-                        position=positions.get(
-                            (candidate.symbol, candidate.token_address)
+            if CAUTIOUS_PROFILE in parallel_profiles:
+                for candidate in candidate_signals:
+                    if not strategy_packet_is_new(candidate, CAUTIOUS_PROFILE):
+                        continue
+                    append_strategy_decision(
+                        signal=candidate,
+                        decision=evaluate_cautious(
+                            candidate,
+                            position=positions.get(
+                                (candidate.symbol, candidate.token_address)
+                            ),
+                            baseline_volume_usd=execution_universe.require(
+                                candidate.symbol,
+                                candidate.token_address,
+                            ).daily_volume_usd,
+                            portfolio_value_usdc=portfolio.total_value_usdc,
                         ),
-                        baseline_volume_usd=execution_universe.require(
-                            candidate.symbol,
-                            candidate.token_address,
-                        ).daily_volume_usd,
-                        portfolio_value_usdc=portfolio.total_value_usdc,
-                    ),
-                    path=strategy_journal_path,
-                    recorded_at=current_time,
-                )
-            for candidate in medium_candidates.values():
-                if not medium_packet_is_new(candidate):
-                    continue
-                address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
-                append_strategy_decision(
-                    signal=candidate,
-                    decision=evaluate_medium_high(
-                        candidate,
-                        position=positions.get(
-                            (candidate.symbol, candidate.token_address)
+                        path=strategy_journal_path,
+                        recorded_at=current_time,
+                    )
+            if MEDIUM_HIGH_PROFILE in parallel_profiles:
+                for candidate in medium_candidates.values():
+                    if not medium_packet_is_new(candidate):
+                        continue
+                    address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
+                    append_strategy_decision(
+                        signal=candidate,
+                        decision=evaluate_medium_high(
+                            candidate,
+                            position=positions.get(
+                                (candidate.symbol, candidate.token_address)
+                            ),
+                            basis=cost_bases.get(address),
+                            all_bases=cost_bases,
+                            baseline_volume_usd=execution_universe.require(
+                                candidate.symbol,
+                                candidate.token_address,
+                            ).daily_volume_usd,
+                            portfolio_value_usdc=portfolio.total_value_usdc,
+                            observations=strategy_observations(
+                                address,
+                                profile=MEDIUM_HIGH_PROFILE,
+                                path=strategy_journal_path,
+                            ),
+                            now=current_time,
                         ),
-                        basis=cost_bases.get(address),
-                        all_bases=cost_bases,
-                        baseline_volume_usd=execution_universe.require(
-                            candidate.symbol,
-                            candidate.token_address,
-                        ).daily_volume_usd,
-                        portfolio_value_usdc=portfolio.total_value_usdc,
-                        observations=strategy_observations(
-                            address,
-                            profile=MEDIUM_HIGH_PROFILE,
-                            path=strategy_journal_path,
-                        ),
-                        now=current_time,
-                    ),
-                    path=strategy_journal_path,
-                    recorded_at=current_time,
-                )
+                        path=strategy_journal_path,
+                        recorded_at=current_time,
+                    )
         except (OSError, StrategyProfileError, ValueError) as error:
             raise ValueError(f"Parallel strategy shadow failed: {error}") from error
     if strategy_profile == MEDIUM_HIGH_PROFILE:
