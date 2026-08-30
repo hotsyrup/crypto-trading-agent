@@ -29,6 +29,7 @@ from app.live_portfolio_worker import (
     STATE,
     _record_cycle_failure,
     _record_cycle_result,
+    _cycle_sleep_seconds,
     _verified_portfolio,
     run_live_cycle,
 )
@@ -150,6 +151,19 @@ class Runtime:
 
 
 class LivePortfolioWorkerTests(unittest.TestCase):
+    def test_valuation_outage_uses_provider_cooldown_without_delaying_normal_cycles(self) -> None:
+        blocked = LiveCycleResult(
+            CYCLE_VALUATION_BLOCKED,
+            AUTHORIZED_TREASURY_ADDRESS,
+            CDP_NETWORK_ID,
+            Decimal("0"),
+            "research unavailable",
+        )
+        ready = replace(blocked, status=CYCLE_NO_SIGNAL)
+
+        self.assertEqual(_cycle_sleep_seconds(60, blocked), 120)
+        self.assertEqual(_cycle_sleep_seconds(60, ready), 60)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)

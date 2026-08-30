@@ -85,6 +85,7 @@ CYCLE_NO_SIGNAL = "NO_ELIGIBLE_SIGNAL"
 CYCLE_VALUATION_BLOCKED = "VALUATION_BLOCKED"
 CYCLE_QUARANTINED = "QUARANTINED_HOLDINGS"
 LIVE_WORKER_INTERVAL_SECONDS = 60
+VALUATION_OUTAGE_COOLDOWN_SECONDS = 120
 RESEARCH_ENVELOPE_FIELDS = {
     "service",
     "schema_version",
@@ -1072,6 +1073,12 @@ def _record_cycle_failure(
     )
 
 
+def _cycle_sleep_seconds(interval: int, result: LiveCycleResult) -> int:
+    if result.status == CYCLE_VALUATION_BLOCKED:
+        return max(interval, VALUATION_OUTAGE_COOLDOWN_SECONDS)
+    return interval
+
+
 def main() -> None:
     server = HTTPServer(
         ("0.0.0.0", int(os.getenv("PORT", "8080"))),  # nosec B104
@@ -1109,6 +1116,7 @@ def main() -> None:
     while True:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
+        cycle_delay = interval
         try:
             live_config = load_live_trading_config()
             executor_config = load_executor_config()
@@ -1167,13 +1175,14 @@ def main() -> None:
                     risk_journal_path=Path("data/live_portfolio_risk.jsonl"),
                 ),
             )
+            cycle_delay = _cycle_sleep_seconds(interval, result)
         except Exception as error:
             _record_cycle_failure(
                 error,
                 cycle_time=cycle_time,
                 correlation_id=correlation_id,
             )
-        time.sleep(interval)
+        time.sleep(cycle_delay)
 
 
 if __name__ == "__main__":
