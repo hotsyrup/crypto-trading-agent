@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -181,6 +181,12 @@ def _research_signals(
         ):
             raise ValueError("Research packets are ambiguous for a governed asset.")
     return tuple(accepted.values())
+
+
+def _research_receipt_time(cycle_time: datetime, elapsed_seconds: float) -> datetime:
+    if elapsed_seconds < 0:
+        raise ValueError("Research request elapsed time cannot be negative.")
+    return cycle_time + timedelta(seconds=elapsed_seconds)
 
 
 def _verified_portfolio(
@@ -504,21 +510,28 @@ def run_live_cycle(
         for item in lifecycle_assessment.held_governed
     )
     try:
-        resolved_research = (
-            research_payload(lifecycle_assessment.required_research_contracts)
-            if callable(research_payload)
-            else research_payload
-        )
+        research_started = time.monotonic()
+        if callable(research_payload):
+            resolved_research = research_payload(
+                lifecycle_assessment.required_research_contracts
+            )
+            research_evaluated_at = _research_receipt_time(
+                current_time,
+                time.monotonic() - research_started,
+            )
+        else:
+            resolved_research = research_payload
+            research_evaluated_at = current_time
         valuation_signals = _research_signals(
             resolved_research,
             resolved_universe,
-            now=current_time,
+            now=research_evaluated_at,
             valuation_contracts=held_research_contracts,
         )
         trade_signals = _research_signals(
             resolved_research,
             resolved_universe,
-            now=current_time,
+            now=research_evaluated_at,
         )
     except (
         HTTPError,

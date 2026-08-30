@@ -30,6 +30,7 @@ from app.live_portfolio_worker import (
     _record_cycle_failure,
     _record_cycle_result,
     _cycle_sleep_seconds,
+    _research_receipt_time,
     _verified_portfolio,
     run_live_cycle,
 )
@@ -152,6 +153,14 @@ class Runtime:
 
 
 class LivePortfolioWorkerTests(unittest.TestCase):
+    def test_research_receipt_time_includes_remote_request_duration(self) -> None:
+        self.assertEqual(
+            _research_receipt_time(NOW, 96.25),
+            NOW + timedelta(seconds=96.25),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            _research_receipt_time(NOW, -1)
+
     def test_parallel_shadow_does_not_reevaluate_same_packet_after_portfolio_change(self) -> None:
         first_runtime = Runtime(
             (
