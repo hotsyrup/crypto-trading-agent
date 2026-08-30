@@ -37,6 +37,7 @@ from app.live_execution_journal import reserve_live_execution
 from app.live_trading_config import BASE_USDC_ADDRESS, load_live_trading_config
 from app.research_agent import build_packet
 from app.portfolio_trading import ResearchSignal
+from app.strategy_profile import MEDIUM_HIGH_PROFILE
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
     EXECUTOR_MODE_CONTROLLED_LIVE,
@@ -151,6 +152,58 @@ class Runtime:
 
 
 class LivePortfolioWorkerTests(unittest.TestCase):
+    def test_parallel_shadow_does_not_reevaluate_same_packet_after_portfolio_change(self) -> None:
+        first_runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+        second_runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("50"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+        executor_config = ExecutorConfig(
+            mode=EXECUTOR_MODE_SHADOW_ONLY,
+            kill_switch_state=KILL_SWITCH_HALTED,
+            max_data_age_seconds=120,
+            max_future_skew_seconds=30,
+        )
+
+        first = run_live_cycle(
+            runtime=first_runtime,
+            research_payload=research_payload(),
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+            live_config=load_live_trading_config(),
+            executor_config=executor_config,
+            strategy_profile=MEDIUM_HIGH_PROFILE,
+            parallel_shadow=True,
+        )
+        second = run_live_cycle(
+            runtime=second_runtime,
+            research_payload=research_payload(),
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW + timedelta(minutes=1),
+            live_config=load_live_trading_config(),
+            executor_config=executor_config,
+            strategy_profile=MEDIUM_HIGH_PROFILE,
+            parallel_shadow=True,
+        )
+
+        self.assertEqual(first.status, CYCLE_NO_SIGNAL, first.reason)
+        self.assertEqual(second.status, CYCLE_NO_SIGNAL, second.reason)
+
     def test_valuation_outage_uses_provider_cooldown_without_delaying_normal_cycles(self) -> None:
         blocked = LiveCycleResult(
             CYCLE_VALUATION_BLOCKED,

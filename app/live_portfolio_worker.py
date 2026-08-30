@@ -638,25 +638,34 @@ def run_live_cycle(
         if identity not in medium_candidates
     )
     try:
-        evaluated_medium_packets = {
+        evaluated_strategy_packets = {
             (
+                str(event.get("profile")),
                 str(event.get("asset_token_address")),
                 str(event.get("packet_id")),
             )
             for event in read_strategy_events(path=strategy_journal_path)
             if event.get("event") == "SIGNAL_EVALUATED"
-            and event.get("profile") == MEDIUM_HIGH_PROFILE
         }
     except (OSError, StrategyProfileError, ValueError) as error:
         raise ValueError(f"Strategy journal unavailable: {error}") from error
 
-    def medium_packet_is_new(candidate: ResearchSignal) -> bool:
+    def strategy_packet_is_new(candidate: ResearchSignal, profile: str) -> bool:
         address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
-        return (address, candidate.packet_id) not in evaluated_medium_packets
+        return (
+            profile,
+            address,
+            candidate.packet_id,
+        ) not in evaluated_strategy_packets
+
+    def medium_packet_is_new(candidate: ResearchSignal) -> bool:
+        return strategy_packet_is_new(candidate, MEDIUM_HIGH_PROFILE)
 
     if parallel_shadow or strategy_profile == MEDIUM_HIGH_PROFILE:
         try:
             for candidate in unroutable_medium:
+                if not medium_packet_is_new(candidate):
+                    continue
                 append_strategy_decision(
                     signal=candidate,
                     decision=StrategyDecision(
@@ -686,6 +695,8 @@ def run_live_cycle(
         }
         try:
             for candidate in candidate_signals:
+                if not strategy_packet_is_new(candidate, CAUTIOUS_PROFILE):
+                    continue
                 append_strategy_decision(
                     signal=candidate,
                     decision=evaluate_cautious(
