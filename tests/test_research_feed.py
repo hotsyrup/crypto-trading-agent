@@ -107,7 +107,7 @@ class ResearchFeedTests(unittest.TestCase):
             f"{WETH_CONTRACT}%2C{USDC_CONTRACT}",
         )
         self.assertNotIn("wallet", request.full_url)
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], 60)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 120)
 
     def test_fresh_complete_authenticated_packets_pass(self):
         decision = evaluate_research_payload(self.payload(), now=self.now)

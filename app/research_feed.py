@@ -312,9 +312,9 @@ def get_research_payload(required_contracts: tuple[str, ...] = ()) -> object:
         request_url,
         headers={"User-Agent": "lumen-trading-monitor/2"},
     )
-    timeout = int(os.getenv("RESEARCH_FEED_TIMEOUT_SECONDS", "60"))
-    if not 5 <= timeout <= 60:
-        raise ValueError("RESEARCH_FEED_TIMEOUT_SECONDS must be between 5 and 60.")
+    timeout = int(os.getenv("RESEARCH_FEED_TIMEOUT_SECONDS", "120"))
+    if not 5 <= timeout <= 120:
+        raise ValueError("RESEARCH_FEED_TIMEOUT_SECONDS must be between 5 and 120.")
     with urlopen(request, timeout=timeout) as response:  # nosec B310
         return json.load(response)
 
