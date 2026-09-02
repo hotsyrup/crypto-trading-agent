@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -305,18 +306,67 @@ def get_research_payload(required_contracts: tuple[str, ...] = ()) -> object:
         for contract in normalized
     ):
         raise ValueError("Research coverage contains an invalid Base contract.")
-    request_url = url
-    if normalized:
-        request_url = f"{url}?{urlencode({'required_contracts': ','.join(normalized)})}"
-    request = Request(
-        request_url,
-        headers={"User-Agent": "lumen-trading-monitor/2"},
-    )
     timeout = int(os.getenv("RESEARCH_FEED_TIMEOUT_SECONDS", "120"))
     if not 5 <= timeout <= 120:
         raise ValueError("RESEARCH_FEED_TIMEOUT_SECONDS must be between 5 and 120.")
-    with urlopen(request, timeout=timeout) as response:  # nosec B310
-        return json.load(response)
+
+    def fetch(contract: str | None) -> object:
+        request_url = url
+        if contract is not None:
+            request_url = f"{url}?{urlencode({'required_contracts': contract})}"
+        request = Request(
+            request_url,
+            headers={"User-Agent": "lumen-trading-monitor/2"},
+        )
+        with urlopen(request, timeout=timeout) as response:  # nosec B310
+            return json.load(response)
+
+    if not normalized:
+        return fetch(None)
+    payloads: dict[str, object] = {}
+    failures: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(normalized))) as executor:
+        futures = {contract: executor.submit(fetch, contract) for contract in normalized}
+        for contract in normalized:
+            try:
+                payloads[contract] = futures[contract].result()
+            except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as error:
+                failures.append(error)
+    if not payloads:
+        raise failures[0]
+    merged_packets = []
+    generated_at = None
+    for contract in normalized:
+        if contract not in payloads:
+            continue
+        payload = payloads[contract]
+        if not isinstance(payload, dict) or not isinstance(payload.get("packets"), list):
+            raise ValueError("Research response is not a mergeable envelope.")
+        if (
+            payload.get("service") != "lumen-base-research-agent"
+            or payload.get("schema_version") != RESEARCH_SCHEMA_VERSION
+            or payload.get("mode") != "observation_only"
+            or payload.get("execution") != "disabled"
+        ):
+            raise ValueError("Research response authority is not mergeable.")
+        timestamp = _aware_timestamp(payload.get("generated_at"), "generated_at")
+        generated_at = timestamp if generated_at is None else max(generated_at, timestamp)
+        merged_packets.extend(
+            packet
+            for packet in payload["packets"]
+            if isinstance(packet, dict)
+            and str(packet.get("contract_address", "")).lower() == contract
+        )
+    if generated_at is None:
+        raise ValueError("Research responses did not include a generation time.")
+    return {
+        "service": "lumen-base-research-agent",
+        "schema_version": RESEARCH_SCHEMA_VERSION,
+        "mode": "observation_only",
+        "execution": "disabled",
+        "generated_at": generated_at.isoformat(),
+        "packets": merged_packets,
+    }
 
 
 def evaluate_research_payload(

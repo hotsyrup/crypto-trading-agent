@@ -167,6 +167,11 @@ def reconstruct_cost_basis(
     events = read_live_execution_events(path=path)
     reservations: dict[str, dict[str, object]] = {}
     mutable: dict[str, dict[str, object]] = {}
+    accounted_intents = {
+        str(event.get("intent_id", ""))
+        for event in events
+        if event.get("event") == "RECONCILIATION_ACCOUNTED"
+    }
 
     def state(address: str) -> dict[str, object]:
         return mutable.setdefault(
@@ -196,19 +201,59 @@ def reconstruct_cost_basis(
         reservation = reservations.get(intent_id)
         if reservation is None:
             raise StrategyProfileError("Live audit outcome has no reservation.")
-        recorded_at = _aware(event.get("recorded_at"), "Live outcome timestamp")
+        if event_name == "RECONCILED_CONFIRMED":
+            continue
         from_token = _contract(reservation.get("from_token"), "Swap input token")
         to_token = _contract(reservation.get("to_token"), "Swap output token")
         asset_address = to_token if from_token == BASE_USDC_ADDRESS else from_token
         item = state(asset_address)
         if event_name in {"BACKEND_FAILED", "RECEIPT_REJECTED"}:
+            if event_name == "RECEIPT_REJECTED" and intent_id in accounted_intents:
+                continue
+            recorded_at = _aware(event.get("recorded_at"), "Live outcome timestamp")
             item["last_failed"] = recorded_at
             continue
-        if event_name != "CONFIRMED":
+        if event_name not in {"CONFIRMED", "RECONCILIATION_ACCOUNTED"}:
             raise StrategyProfileError("Live audit contains an unsupported outcome.")
         details = event.get("details")
         if not isinstance(details, dict):
             raise StrategyProfileError("Confirmed receipt details are unavailable.")
+        if event_name == "RECONCILIATION_ACCOUNTED":
+            reconciliation_sequence = details.get("source_reconciliation_sequence")
+            receipt_sequence = details.get("source_receipt_sequence")
+            if (
+                type(reconciliation_sequence) is not int
+                or type(receipt_sequence) is not int
+                or not 0 < receipt_sequence < reconciliation_sequence < int(event["sequence"])
+            ):
+                raise StrategyProfileError(
+                    "Reconciled accounting source sequence is invalid."
+                )
+            reconciliation = events[reconciliation_sequence - 1]
+            receipt = events[receipt_sequence - 1]
+            receipt_details = receipt.get("details")
+            if (
+                reconciliation.get("event") != "RECONCILED_CONFIRMED"
+                or receipt.get("event") != "RECEIPT_REJECTED"
+                or reconciliation.get("intent_id") != intent_id
+                or receipt.get("intent_id") != intent_id
+                or not isinstance(receipt_details, dict)
+                or details.get("transaction_hash")
+                != receipt_details.get("transaction_hash")
+                or details.get("verification_source") != "public_base_rpc"
+                or _contract(details.get("from_token"), "Accounting input token")
+                != from_token
+                or _contract(details.get("to_token"), "Accounting output token")
+                != to_token
+                or details.get("from_decimals") != reservation.get("from_decimals")
+                or details.get("to_decimals") != reservation.get("to_decimals")
+            ):
+                raise StrategyProfileError(
+                    "Reconciled accounting evidence does not match its receipt."
+                )
+            recorded_at = _aware(details.get("executed_at"), "Reconciled execution timestamp")
+        else:
+            recorded_at = _aware(event.get("recorded_at"), "Live outcome timestamp")
         from_amount = _decimal(details.get("from_amount"), "Confirmed input")
         to_amount = _decimal(details.get("to_amount"), "Confirmed output")
         if from_token == BASE_USDC_ADDRESS and to_token != BASE_USDC_ADDRESS:
@@ -235,9 +280,6 @@ def reconstruct_cost_basis(
             sold_cost = cost_before * sold_quantity / quantity_before
             remaining_quantity = quantity_before - sold_quantity
             remaining_cost = cost_before - sold_cost
-            if remaining_quantity <= tolerance:
-                remaining_quantity = Decimal("0")
-                remaining_cost = Decimal("0")
             realized = to_amount - sold_cost
             item["quantity"] = remaining_quantity
             item["cost"] = remaining_cost
@@ -708,6 +750,16 @@ def evaluate_medium_high(
                 "hold", "cost_basis_unverified", stop_loss_percent=stop_percent,
                 trailing_distance_percent=trailing,
             )
+        if (
+            basis.last_failed_at is not None
+            and now - basis.last_failed_at < FAILED_COOLDOWN
+        ):
+            return StrategyDecision(
+                MEDIUM_HIGH_PROFILE, score, components, classification,
+                "hold", "failed_transaction_cooldown",
+                stop_loss_percent=stop_percent,
+                trailing_distance_percent=trailing,
+            )
         average = basis.average_entry_price_usdc
         profit_percent = (signal.price_usd / average - Decimal("1")) * Decimal("100")
         position_observations = tuple(
@@ -806,7 +858,11 @@ def strategy_metrics(
 ) -> dict[str, object]:
     signals = read_strategy_events(path=strategy_journal_path)
     audit = read_live_execution_events(path=live_audit_path)
-    confirmed = [item for item in audit if item.get("event") == "CONFIRMED"]
+    confirmed = [
+        item
+        for item in audit
+        if item.get("event") in {"CONFIRMED", "RECONCILIATION_ACCOUNTED"}
+    ]
     bases = reconstruct_cost_basis(path=live_audit_path)
     receipt_spreads = []
     gas_costs = []

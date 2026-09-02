@@ -3,6 +3,7 @@ import unittest
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 from app.research_feed import (
@@ -97,17 +98,94 @@ class ResearchFeedTests(unittest.TestCase):
         response.headers = {}
         urlopen.return_value = response
 
-        get_research_payload((WETH_CONTRACT, USDC_CONTRACT))
+        get_research_payload((WETH_CONTRACT,))
 
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
             "https://lumen-base-research-agent-production.up.railway.app"
             "/research/crypto/base/latest?required_contracts="
-            f"{WETH_CONTRACT}%2C{USDC_CONTRACT}",
+            f"{WETH_CONTRACT}",
         )
         self.assertNotIn("wallet", request.full_url)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 120)
+
+    @patch("app.research_feed.urlopen")
+    def test_required_contracts_are_isolated_when_bulk_provider_times_out(self, urlopen):
+        contracts = (
+            WETH_CONTRACT,
+            USDC_CONTRACT,
+            "0x00f3c42833c3170159af4e92dbb451fb3f708917",
+        )
+
+        def respond(request, **_kwargs):
+            requested = parse_qs(urlparse(request.full_url).query)[
+                "required_contracts"
+            ][0].split(",")
+            if len(requested) != 1:
+                raise TimeoutError("bulk valuation deadline exceeded")
+            response = BytesIO(
+                json.dumps(
+                    {
+                        "service": "lumen-base-research-agent",
+                        "schema_version": 2,
+                        "mode": "observation_only",
+                        "execution": "disabled",
+                        "generated_at": self.now.isoformat(),
+                        "packets": [{"contract_address": requested[0]}],
+                    }
+                ).encode()
+            )
+            response.headers = {}
+            return response
+
+        urlopen.side_effect = respond
+
+        payload = get_research_payload(contracts)
+
+        self.assertEqual(
+            tuple(packet["contract_address"] for packet in payload["packets"]),
+            contracts,
+        )
+        self.assertEqual(urlopen.call_count, 3)
+
+    @patch("app.research_feed.urlopen")
+    def test_one_contract_timeout_preserves_other_valuation_packets(self, urlopen):
+        contracts = (
+            WETH_CONTRACT,
+            USDC_CONTRACT,
+            "0x00f3c42833c3170159af4e92dbb451fb3f708917",
+        )
+
+        def respond(request, **_kwargs):
+            contract = parse_qs(urlparse(request.full_url).query)[
+                "required_contracts"
+            ][0]
+            if contract == USDC_CONTRACT:
+                raise TimeoutError("one contract timed out")
+            response = BytesIO(
+                json.dumps(
+                    {
+                        "service": "lumen-base-research-agent",
+                        "schema_version": 2,
+                        "mode": "observation_only",
+                        "execution": "disabled",
+                        "generated_at": self.now.isoformat(),
+                        "packets": [{"contract_address": contract}],
+                    }
+                ).encode()
+            )
+            response.headers = {}
+            return response
+
+        urlopen.side_effect = respond
+
+        payload = get_research_payload(contracts)
+
+        self.assertEqual(
+            tuple(packet["contract_address"] for packet in payload["packets"]),
+            (contracts[0], contracts[2]),
+        )
 
     def test_fresh_complete_authenticated_packets_pass(self):
         decision = evaluate_research_payload(self.payload(), now=self.now)

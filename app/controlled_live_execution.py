@@ -41,7 +41,14 @@ CDP_SWAP_NETWORK = "base"
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 PERMIT2_ADDRESS = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 MAX_SLIPPAGE_BPS = 100
-RECEIPT_SLIPPAGE_BPS_TOLERANCE = Decimal("0.00001")
+# CDP independently rounds the displayed output and minimum-output amounts.
+# The largest shortfall in the three 2026-09-01 production receipts was
+# 0.000021 USDC, so accept at most 25 micro-USDC of that display noise.
+USDC_RECEIPT_ROUNDING_TOLERANCE = Decimal("0.000025")
+# The 2026-09-02 production buy differed by about 1.7e-10 bps because CDP
+# independently rounded token output and minimum-output amounts. Keep the
+# non-USDC allowance far below meaningful excess slippage.
+NON_USDC_RECEIPT_SLIPPAGE_BPS_TOLERANCE = Decimal("0.00001")
 TRANSACTION_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}")
 
 STATUS_CONFIRMED = "CONFIRMED"
@@ -260,13 +267,23 @@ def _validate_receipt(
         )
     ):
         reasons.append("CDP receipt output amounts are invalid.")
-    elif (
-        (receipt.to_amount - receipt.min_to_amount)
-        * Decimal("10000")
-        / receipt.to_amount
-        > Decimal(request.slippage_bps) + RECEIPT_SLIPPAGE_BPS_TOLERANCE
-    ):
-        reasons.append("CDP receipt minimum output exceeds approved slippage.")
+    else:
+        approved_minimum_output = (
+            receipt.to_amount
+            * (Decimal("10000") - Decimal(request.slippage_bps))
+            / Decimal("10000")
+        )
+        rounding_tolerance = (
+            USDC_RECEIPT_ROUNDING_TOLERANCE
+            if request.to_token.strip().lower() == BASE_USDC_ADDRESS
+            else (
+                receipt.to_amount
+                * NON_USDC_RECEIPT_SLIPPAGE_BPS_TOLERANCE
+                / Decimal("10000")
+            )
+        )
+        if receipt.min_to_amount + rounding_tolerance < approved_minimum_output:
+            reasons.append("CDP receipt minimum output exceeds approved slippage.")
     approval_values = (
         receipt.approval_transaction_hash,
         receipt.approval_token,
@@ -642,10 +659,7 @@ class CdpAgentKitBackend:
                     or quoted_output < minimum_output
                     or (
                         request.to_token.lower() == BASE_USDC_ADDRESS
-                        and (
-                            quoted_output > request.notional_usdc
-                            or quoted_output > MAX_TRADE_NOTIONAL_USDC
-                        )
+                        and quoted_output > MAX_TRADE_NOTIONAL_USDC
                     )
                 ):
                     raise RuntimeError(

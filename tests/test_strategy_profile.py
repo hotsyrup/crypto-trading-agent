@@ -11,6 +11,8 @@ from unittest.mock import patch
 from app.controlled_live_execution import NATIVE_ETH_ADDRESS
 from app.live_execution_journal import (
     append_live_execution_event,
+    reconcile_rejected_receipt_as_confirmed,
+    record_reconciled_transfer_accounting,
     read_live_execution_events,
     reserve_live_execution,
 )
@@ -41,6 +43,7 @@ from app.strategy_profile import (
     portfolio_cooldown_reason,
     read_strategy_events,
     reconstruct_cost_basis,
+    strategy_metrics,
 )
 from tests.test_portfolio_trading import Backend, portfolio, risk, universe
 from app.live_trading_config import load_live_trading_config
@@ -217,6 +220,209 @@ class CostBasisTests(unittest.TestCase):
             Decimal("40"),
         )
 
+    def test_reconciliation_metadata_is_accepted_without_reconstructing_basis(self) -> None:
+        self.reserve("sell-reconciled", side="SELL", amount=Decimal("7"), recorded_at=NOW)
+        append_live_execution_event(
+            event="RECEIPT_REJECTED",
+            intent_id="sell-reconciled",
+            intent_fingerprint="sell-reconciled".ljust(64, "f")[:64],
+            details={
+                "success": True,
+                "transaction_hash": "0x" + "b" * 64,
+                "validation_reasons": [
+                    "CDP receipt minimum output exceeds approved slippage."
+                ],
+            },
+            path=self.audit,
+            recorded_at=NOW,
+        )
+        reconcile_rejected_receipt_as_confirmed(
+            source_sequence=2,
+            receipt_status="0x1",
+            verification_source="independent_base_rpc",
+            path=self.audit,
+            recorded_at=NOW,
+        )
+
+        item = reconstruct_cost_basis(path=self.audit)[AERO_ADDRESS]
+
+        self.assertEqual(item.confirmed_quantity, Decimal("0"))
+        self.assertEqual(item.remaining_cost_usdc, Decimal("0"))
+        self.assertEqual(item.confirmed_buy_count, 0)
+        self.assertEqual(item.last_failed_at, NOW)
+
+    def test_three_production_reconciliations_rebuild_exact_exits_and_dust(self) -> None:
+        cases = (
+            (
+                "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+                "7.145476",
+                "0.002515683846851278",
+                "0.002515683710638053",
+                "6.9958",
+                "6.9608",
+                6995866,
+                "0x062f99ea9a65d9252fae2869a02cb536caae45786e6c6bc71af8f01b62dc72aa",
+                50731970,
+                "1.36213225E-10",
+                "3.86896124224166060477E-7",
+                "-0.149609613103875775833939523",
+            ),
+            (
+                "0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842",
+                "7.137128",
+                "2.753060213034998064",
+                "2.753059842519685039",
+                "6.97651",
+                "6.94161",
+                6973272,
+                "0xdb673d657dc7fc126bda6c0601cedaf67f1cda572640152915693b75797643d7",
+                50738798,
+                "3.70515313025E-7",
+                "9.60536643005081733421E-7",
+                "-0.163855039463356994918266579",
+            ),
+            (
+                "0xf43eb8de897fbc7f2502483b2bef7bb9ea179229",
+                "7.108281",
+                "1.295063407335678620",
+                "1.295063339382940108",
+                "7.117864",
+                "7.082264",
+                7117970,
+                "0xf1741ee037d158e4758e10f32e7ce9345514d78dd81522f915acef6aba7e9b3f",
+                50743005,
+                "6.7952738512E-8",
+                "3.72975683913844003107E-7",
+                "0.009689372975683913844003107",
+            ),
+        )
+        for index, case in enumerate(cases):
+            (
+                asset,
+                cost,
+                bought,
+                sold,
+                provider_output,
+                minimum,
+                exact_output_atomic,
+                transaction_hash,
+                block_number,
+                _expected_quantity,
+                _expected_cost,
+                _expected_pl,
+            ) = case
+            buy_intent = f"production-buy-{index}"
+            sell_intent = f"production-sell-{index}"
+            reserve_live_execution(
+                intent_id=buy_intent,
+                intent_fingerprint=buy_intent.ljust(64, "f")[:64],
+                notional_usdc=Decimal(cost),
+                route_id="production-route",
+                wallet_address="0x" + "1" * 40,
+                chain_id=8453,
+                quote_id=f"quote-{buy_intent}",
+                quote_observed_at=NOW,
+                from_token=BASE_USDC_ADDRESS,
+                to_token=asset,
+                from_amount=Decimal(cost),
+                from_decimals=6,
+                to_decimals=18,
+                slippage_bps=50,
+                strategy_profile=MEDIUM_HIGH_PROFILE,
+                entry_score=88,
+                path=self.audit,
+                recorded_at=NOW,
+            )
+            append_live_execution_event(
+                event="CONFIRMED",
+                intent_id=buy_intent,
+                intent_fingerprint=buy_intent.ljust(64, "f")[:64],
+                details={
+                    "from_amount": cost,
+                    "to_amount": bought,
+                    "min_to_amount": bought,
+                },
+                path=self.audit,
+                recorded_at=NOW,
+            )
+            reserve_live_execution(
+                intent_id=sell_intent,
+                intent_fingerprint=sell_intent.ljust(64, "f")[:64],
+                notional_usdc=Decimal(provider_output),
+                route_id="production-route",
+                wallet_address="0x" + "1" * 40,
+                chain_id=8453,
+                quote_id=f"quote-{sell_intent}",
+                quote_observed_at=NOW,
+                from_token=asset,
+                to_token=BASE_USDC_ADDRESS,
+                from_amount=Decimal(sold),
+                from_decimals=18,
+                to_decimals=6,
+                slippage_bps=50,
+                strategy_profile=MEDIUM_HIGH_PROFILE,
+                exit_reason="dual_momentum_reversal",
+                path=self.audit,
+                recorded_at=NOW,
+            )
+            append_live_execution_event(
+                event="RECEIPT_REJECTED",
+                intent_id=sell_intent,
+                intent_fingerprint=sell_intent.ljust(64, "f")[:64],
+                details={
+                    "success": True,
+                    "transaction_hash": transaction_hash,
+                    "from_amount": sold,
+                    "to_amount": provider_output,
+                    "min_to_amount": minimum,
+                    "validation_reasons": [
+                        "CDP receipt minimum output exceeds approved slippage."
+                    ],
+                },
+                path=self.audit,
+                recorded_at=NOW,
+            )
+            receipt_sequence = len(read_live_execution_events(path=self.audit))
+            reconciliation = reconcile_rejected_receipt_as_confirmed(
+                source_sequence=receipt_sequence,
+                receipt_status="0x1",
+                verification_source="independent_base_rpc",
+                path=self.audit,
+                recorded_at=NOW,
+            )
+            record_reconciled_transfer_accounting(
+                reconciliation_sequence=reconciliation.sequence,
+                transaction_hash=transaction_hash,
+                block_number=block_number,
+                from_atomic_amount=int(Decimal(sold).scaleb(18)),
+                to_atomic_amount=exact_output_atomic,
+                verification_source="public_base_rpc",
+                path=self.audit,
+                recorded_at=NOW,
+            )
+
+        bases = reconstruct_cost_basis(path=self.audit)
+
+        for case in cases:
+            asset = case[0]
+            item = bases[asset]
+            self.assertEqual(item.confirmed_quantity, Decimal(case[9]))
+            self.assertEqual(item.remaining_cost_usdc, Decimal(case[10]))
+            self.assertEqual(item.realized_pl_usdc, Decimal(case[11]))
+            self.assertEqual(len(item.exits), 1)
+            self.assertTrue(item.verified)
+            self.assertIsNone(item.last_failed_at)
+        metrics = strategy_metrics(
+            strategy_journal_path=Path(self.temp.name) / "strategy.jsonl",
+            live_audit_path=self.audit,
+        )
+        self.assertEqual(metrics["exits"], 3)
+        self.assertEqual(metrics["turnover_usdc"], "42.481059")
+        self.assertEqual(
+            metrics["realized_pl_usdc"],
+            "-0.303775279591548856908202995",
+        )
+
     def test_oversell_and_corrupt_hash_chain_fail_closed(self) -> None:
         self.reserve("buy", side="BUY", amount=Decimal("20"), recorded_at=NOW)
         self.confirm("buy", from_amount="20", to_amount="10", recorded_at=NOW)
@@ -366,6 +572,20 @@ class MediumHighStrategyTests(unittest.TestCase):
         self.assertEqual((hard.action, hard.exit_reason), ("sell", "hard_stop_loss"))
         self.assertGreaterEqual(hard.stop_loss_percent, Decimal("8"))
         self.assertLessEqual(hard.stop_loss_percent, Decimal("12"))
+
+        failed_recently = self.evaluate(
+            signal(
+                price_usd=Decimal("0.87"),
+                change_h6_percent=Decimal("-1"),
+                change_h24_percent=Decimal("-2"),
+            ),
+            held=position("0.87"),
+            inventory=basis(last_failed_at=NOW - timedelta(minutes=5)),
+        )
+        self.assertEqual(
+            (failed_recently.action, failed_recently.exit_reason),
+            ("hold", "failed_transaction_cooldown"),
+        )
 
         partial = self.evaluate(
             signal(price_usd=Decimal("1.16")),
