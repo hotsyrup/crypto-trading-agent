@@ -2,4 +2,4 @@
 coinbase-agentkit==0.7.4
 eth-utils==6.0.0
 cdp-sdk==1.48.0
-solana==0.36.10
+solana==0.40.3
