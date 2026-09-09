@@ -556,6 +556,24 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(response["packets"], [])
         load.assert_called_once()
 
+    def test_exact_contract_success_is_independent_of_background_cycle_state(self) -> None:
+        with (
+            patch.dict(
+                "app.research_agent.STATE",
+                {"status": "failed"},
+            ),
+            patch(
+                "app.research_agent.ensure_required_contract_packets",
+                return_value=[],
+            ),
+        ):
+            status, response = public_route_response(
+                f"/research/crypto/base/latest?required_contracts={ADDRESS}"
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["packets"], [])
+
     def test_exact_contract_refresh_batches_without_provider_truncation(self) -> None:
         contracts = tuple(f"0x{number:040x}" for number in range(1, 32))
         with patch("app.research_agent.fetch_pairs", return_value=[]) as fetch:
