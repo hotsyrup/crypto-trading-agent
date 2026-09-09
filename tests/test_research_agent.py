@@ -539,6 +539,47 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(packets[0]["packet_id"], fresh["packet_id"])
         self.assertFalse(packets[0]["is_stale"])
 
+    def test_exact_contract_refresh_rechecks_after_provider_lock_wait(self) -> None:
+        fresh = build_packet(
+            {
+                "contract_address": ADDRESS,
+                "profile_url": None,
+                "discovery_source": "configured_watchlist",
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            sample_pair(),
+            datetime(2026, 8, 10, 22, 0, tzinfo=timezone.utc),
+            Decimal("50000"),
+            5,
+        )
+        fresh["is_stale"] = False
+        current_time = datetime(2026, 8, 10, 22, 0, 30, tzinfo=timezone.utc)
+        config = (
+            60,
+            25,
+            Decimal("50000"),
+            5,
+            Path("research.sqlite3"),
+            (ADDRESS,),
+        )
+        with (
+            patch("app.research_agent.load_config", return_value=config),
+            patch(
+                "app.research_agent.load_latest_packets_for_contracts",
+                side_effect=[[], [fresh], [fresh]],
+            ) as load,
+            patch("app.research_agent._build_contract_packets") as refresh,
+        ):
+            packets = ensure_required_contract_packets(
+                (ADDRESS,),
+                now=current_time,
+            )
+
+        self.assertEqual(load.call_count, 3)
+        refresh.assert_not_called()
+        self.assertEqual(packets[0]["packet_id"], fresh["packet_id"])
+
     def test_required_contract_query_is_exact_and_bounded(self) -> None:
         path = f"/research/crypto/base/latest?required_contracts={ADDRESS}"
         self.assertEqual(required_contracts_from_path(path), (ADDRESS,))

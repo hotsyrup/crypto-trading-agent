@@ -66,7 +66,7 @@ STATE: dict[str, object] = {
     "packets_stored": 0,
     "last_error": None,
 }
-RESEARCH_PROVIDER_LOCK = threading.Lock()
+RESEARCH_PROVIDER_LOCK = threading.RLock()
 
 
 def _utc_now() -> datetime:
@@ -652,18 +652,44 @@ def ensure_required_contract_packets(
         if current_time - received_at > REQUIRED_PACKET_MAX_AGE:
             refresh.append(contract)
     if refresh:
-        pair_age_by_contract = load_pair_creation_fallbacks(
-            database_path,
-            tuple(refresh),
-            now=current_time,
-        )
-        packets = _build_contract_packets(
-            tuple(refresh),
-            minimum_liquidity=minimum_liquidity,
-            freshness=freshness,
-            pair_age_by_contract=pair_age_by_contract,
-        )
-        store_packets(database_path, packets)
+        with RESEARCH_PROVIDER_LOCK:
+            # Another request or the background cycle may have refreshed the
+            # same contracts while this caller waited for provider access.
+            # Recheck under the lock to keep refreshes single-flight.
+            latest = load_latest_packets_for_contracts(
+                database_path,
+                tuple(refresh),
+                now=current_time,
+            )
+            latest_by_contract = {
+                str(packet["contract_address"]).lower(): packet for packet in latest
+            }
+            refresh = [
+                contract
+                for contract in refresh
+                if (
+                    contract not in latest_by_contract
+                    or latest_by_contract[contract]["is_stale"] is True
+                    or current_time
+                    - datetime.fromisoformat(
+                        str(latest_by_contract[contract]["received_at"])
+                    )
+                    > REQUIRED_PACKET_MAX_AGE
+                )
+            ]
+            if refresh:
+                pair_age_by_contract = load_pair_creation_fallbacks(
+                    database_path,
+                    tuple(refresh),
+                    now=current_time,
+                )
+                packets = _build_contract_packets(
+                    tuple(refresh),
+                    minimum_liquidity=minimum_liquidity,
+                    freshness=freshness,
+                    pair_age_by_contract=pair_age_by_contract,
+                )
+                store_packets(database_path, packets)
     result = load_latest_packets_for_contracts(
         database_path,
         contracts,
