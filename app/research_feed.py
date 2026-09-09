@@ -15,11 +15,12 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_RESEARCH_URL = (
-    "https://lumen-base-research-agent-production.up.railway.app"
+    "https://lumen-base-research-v3-production.up.railway.app"
     "/research/crypto/base/latest"
 )
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
-ALLOWED_HOST = "lumen-base-research-agent-production.up.railway.app"
+V3_COMPAT_RESEARCH_PATH = "/research/v3/bundle"
+ALLOWED_HOST = "lumen-base-research-v3-production.up.railway.app"
 WETH_CONTRACT = "0x4200000000000000000000000000000000000006"
 USDC_CONTRACT = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 REQUIRED_CONTRACTS = {WETH_CONTRACT, USDC_CONTRACT}
@@ -292,8 +293,15 @@ def get_research_payload(required_contracts: tuple[str, ...] = ()) -> object:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_HOST:
         raise ValueError("Research feed must use the approved Railway HTTPS host.")
-    if parsed.path != BASE_RESEARCH_PATH or parsed.query or parsed.fragment:
-        raise ValueError(f"Research feed path must be {BASE_RESEARCH_PATH}.")
+    if (
+        parsed.path not in {BASE_RESEARCH_PATH, V3_COMPAT_RESEARCH_PATH}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"Research feed path must be {BASE_RESEARCH_PATH} "
+            f"or {V3_COMPAT_RESEARCH_PATH}."
+        )
     if len(required_contracts) > 50:
         raise ValueError("Research coverage cannot exceed 50 exact contracts.")
     normalized = tuple(

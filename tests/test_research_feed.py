@@ -103,12 +103,36 @@ class ResearchFeedTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
-            "https://lumen-base-research-agent-production.up.railway.app"
+            "https://lumen-base-research-v3-production.up.railway.app"
             "/research/crypto/base/latest?required_contracts="
             f"{WETH_CONTRACT}",
         )
         self.assertNotIn("wallet", request.full_url)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 120)
+
+    @patch("app.research_feed.urlopen")
+    def test_deployed_v3_compatibility_url_is_approved(self, urlopen):
+        response = BytesIO(json.dumps(self.payload()).encode())
+        response.headers = {}
+        urlopen.return_value = response
+
+        with patch.dict(
+            "os.environ",
+            {
+                "RESEARCH_FEED_URL": (
+                    "https://lumen-base-research-v3-production.up.railway.app"
+                    "/research/v3/bundle"
+                )
+            },
+            clear=True,
+        ):
+            get_research_payload()
+
+        self.assertEqual(
+            urlopen.call_args.args[0].full_url,
+            "https://lumen-base-research-v3-production.up.railway.app"
+            "/research/v3/bundle",
+        )
 
     @patch("app.research_feed.urlopen")
     def test_required_contracts_are_isolated_when_bulk_provider_times_out(self, urlopen):
