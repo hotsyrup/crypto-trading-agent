@@ -826,7 +826,7 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
             else load_latest_packets(database_path)
         )
         return (
-            200 if STATE["status"] != "failed" else 503,
+            200 if required or STATE["status"] != "failed" else 503,
             {
                 "service": "lumen-base-research-agent",
                 "schema_version": RESEARCH_SCHEMA_VERSION,
