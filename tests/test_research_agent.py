@@ -206,20 +206,15 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(watchlist[1], "0x940181a94a35a4569e4529a3cdfb74e38fd98631")
         self.assertEqual(watchlist[-1], "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913")
 
-    @patch("app.research_agent.time.sleep")
     @patch("app.research_agent.get_json")
-    def test_fetch_pairs_queries_each_contract_to_avoid_provider_truncation(
-        self, get_json, sleep
-    ) -> None:
-        get_json.side_effect = [[sample_pair("100")], [sample_pair("200")]]
+    def test_fetch_pairs_uses_provider_native_batch(self, get_json) -> None:
+        get_json.return_value = [sample_pair("100"), sample_pair("200")]
         second = "0x0000000000000000000000000000000000000002"
         pairs = fetch_pairs([ADDRESS, second])
         self.assertEqual(len(pairs), 2)
-        self.assertEqual(
-            [call.args[0] for call in get_json.call_args_list],
-            [f"/tokens/v1/base/{ADDRESS}", f"/tokens/v1/base/{second}"],
+        get_json.assert_called_once_with(
+            f"/tokens/v1/base/{ADDRESS},{second}"
         )
-        sleep.assert_called_once_with(3.25)
 
     @patch("app.research_agent.store_packets")
     @patch("app.research_agent.fetch_pairs")
