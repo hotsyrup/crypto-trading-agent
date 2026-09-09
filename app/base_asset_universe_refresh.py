@@ -119,7 +119,7 @@ def assess_cross_verified_snapshot(
                 {
                     "coin_id": None,
                     "symbol": None,
-                    "token_address": None,
+                    "token_address": None,  # nosec B105 - absence marker, not a credential
                     "reasons": ["invalid_market_record"],
                 }
             )
@@ -398,82 +398,3 @@ def refresh_governed_asset_universe(path: Path) -> dict[str, object]:
             and address != BASE_USDC_ADDRESS
             and address not in ordered_addresses
         ):
-            ordered_addresses.append(address)
-        if len(ordered_addresses) >= MAX_CANDIDATES:
-            break
-
-    token_details: dict[str, object] = {}
-    for offset in range(0, len(ordered_addresses), TOKEN_BATCH_SIZE):
-        batch = ordered_addresses[offset : offset + TOKEN_BATCH_SIZE]
-        payload = _get_json(
-            f"https://{GECKOTERMINAL_HOST}/api/v2/networks/base/tokens/multi/"
-            + ",".join(batch)
-        )
-        for item in _data_list(payload, "GeckoTerminal tokens"):
-            if not isinstance(item, dict) or not isinstance(item.get("attributes"), dict):
-                continue
-            attributes = item["attributes"]
-            address = str(attributes.get("address", "")).lower()
-            if ADDRESS_PATTERN.fullmatch(address):
-                token_details[address] = attributes
-
-    pool_candidates = [
-        address
-        for address in ordered_addresses
-        if isinstance(token_details.get(address), dict)
-        and _decimal(token_details[address].get("total_reserve_in_usd"))
-        >= MINIMUM_LIQUIDITY_USD
-        and _decimal(
-            token_details[address].get("volume_usd", {}).get("h24")
-            if isinstance(token_details[address].get("volume_usd"), dict)
-            else None
-        )
-        >= MINIMUM_DAILY_VOLUME_USD
-    ]
-    pools_by_address: dict[str, list[object]] = {}
-    for number, address in enumerate(pool_candidates):
-        if number:
-            time.sleep(GECKOTERMINAL_REQUEST_INTERVAL_SECONDS)
-        payload = _get_json(
-            f"https://{GECKOTERMINAL_HOST}/api/v2/networks/base/tokens/"
-            f"{address}/pools?page=1"
-        )
-        pools_by_address[address] = _data_list(payload, "GeckoTerminal pools")
-
-    try:
-        assessment = assess_cross_verified_snapshot(
-            markets=markets,
-            coins=coins,
-            token_details=token_details,
-            pools_by_address=pools_by_address,
-            observed_at=datetime.now(timezone.utc),
-        )
-    except UniverseRefreshError as error:
-        _write_json_atomically(_diagnostics_path(path), error.diagnostics)
-        _log_assessment(error.diagnostics, status="rejected")
-        raise
-    _write_json_atomically(path, assessment.snapshot)
-    _write_json_atomically(_diagnostics_path(path), assessment.diagnostics)
-    _log_assessment(assessment.diagnostics, status="refreshed")
-    return assessment.snapshot
-
-
-def main() -> None:
-    path = Path(
-        os.getenv("LIVE_ASSET_UNIVERSE_PATH", "data/base_top25_universe.json")
-    )
-    snapshot = refresh_governed_asset_universe(path)
-    print(
-        json.dumps(
-            {
-                "status": "refreshed",
-                "path": str(path),
-                "observed_at": snapshot["observed_at"],
-                "asset_count": len(snapshot["assets"]),
-            }
-        )
-    )
-
-
-if __name__ == "__main__":
-    main()
