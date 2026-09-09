@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from http.server import HTTPServer
 from io import StringIO
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
@@ -29,6 +30,7 @@ from app.live_portfolio_worker import (
     STATE,
     _record_cycle_failure,
     _record_cycle_result,
+    _readiness_code,
     _cycle_sleep_seconds,
     _parallel_strategy_profiles,
     _research_receipt_time,
@@ -858,9 +860,41 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertEqual(payload["operational_status"], "operational")
         self.assertEqual(payload["trading_readiness"], "blocked")
         self.assertEqual(payload["cycle_status"], "valuation_blocked")
+        self.assertEqual(
+            payload["readiness_code"], "RESEARCH_OR_VALUATION_BLOCKED"
+        )
         self.assertEqual(payload["last_block_reason"], "blocked")
         self.assertEqual(payload["held_required"], 2)
         self.assertEqual(payload["held_covered"], 1)
+
+    def test_readiness_endpoint_fails_closed_while_trading_is_blocked(self) -> None:
+        server = HTTPServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as context:
+                urlopen(
+                    f"http://127.0.0.1:{server.server_port}/ready",
+                    timeout=2,
+                )
+            self.assertEqual(context.exception.code, 503)
+            thread.join(timeout=2)
+        finally:
+            server.server_close()
+
+    def test_readiness_code_reports_live_only_when_all_execution_gates_are_open(self) -> None:
+        STATE.update(
+            operational_status="operational",
+            trading_readiness="ready",
+            cycle_status="no_eligible_signal",
+            safety_gates={
+                "live_trading_enabled": True,
+                "executor_mode": EXECUTOR_MODE_CONTROLLED_LIVE,
+                "kill_switch": KILL_SWITCH_ARMED,
+            },
+        )
+
+        self.assertEqual(_readiness_code(), "READY_LIVE")
 
     def test_integrity_failure_has_nonblank_safe_structured_diagnostic(self) -> None:
         output = StringIO()
