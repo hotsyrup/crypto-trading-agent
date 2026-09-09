@@ -1,6 +1,6 @@
 # Crypto Trading Agent — Project Status
 
-_Last updated: 2026-08-29_
+_Last updated: 2026-09-09_
 
 ## Mission
 
@@ -219,6 +219,21 @@ favorable report can only let an existing candidate continue through every
 unchanged control; an adverse, invalid, unavailable, stale, or ambiguous result
 rejects that candidate. Activation must not create a test purchase and must wait
 for a genuine strategy candidate.
+
+## 2026-09-09 Reliability Reset
+
+The user authorized a live reliability reset and explicitly declined a
+seven-day shadow-only hold. The authorized production profile is
+`medium_high_v1`; Agent Commerce remains disabled and outside the critical
+path. The absolute `$20` per-trade, `$100` per-UTC-day, and `$500` capital
+ceilings remain unchanged.
+
+The release adds a separate fail-closed `/ready` endpoint, explicit readiness
+codes, consecutive-failure reporting, and bounded CDP wallet-provider
+reinitialization. It also corrects no-action strategy decisions so they report
+`NO_ELIGIBLE_SIGNAL` instead of a false policy failure. GitHub `main` is the
+required source of truth for both Railway services; detached snapshot deploys
+are not an acceptable production release path.
 
 ## Medium-High Strategy Validation Branch
 
