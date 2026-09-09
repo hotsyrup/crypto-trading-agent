@@ -771,6 +771,59 @@ class ControlledLiveExecutionTests(unittest.TestCase):
 
 
 class CdpAgentKitBackendTests(unittest.TestCase):
+    def test_balance_lookup_is_bounded_and_reports_timeout(self) -> None:
+        observed: dict[str, object] = {}
+
+        class Config:
+            def __init__(self, **values: object):
+                pass
+
+        class Wallet:
+            def __init__(self, config: Config):
+                pass
+
+            def get_address(self) -> str:
+                return AUTHORIZED_TREASURY_ADDRESS
+
+            def get_network(self):
+                return types.SimpleNamespace(
+                    chain_id=str(BASE_MAINNET_CHAIN_ID),
+                    network_id=CDP_NETWORK_ID,
+                )
+
+            def get_client(self):
+                raise AssertionError("The forced timeout should cancel before I/O.")
+
+        async def force_timeout(coroutine, *, timeout: int):
+            observed["timeout"] = timeout
+            coroutine.close()
+            raise TimeoutError
+
+        module = types.SimpleNamespace(
+            CdpEvmWalletProvider=Wallet,
+            CdpEvmWalletProviderConfig=Config,
+        )
+        with (
+            patch.dict("sys.modules", agentkit_modules(module)),
+            patch.dict("os.environ", {"CDP_BALANCE_TIMEOUT_SECONDS": "7"}),
+            patch("app.controlled_live_execution.asyncio.wait_for", force_timeout),
+        ):
+            with self.assertRaisesRegex(
+                TimeoutError,
+                "CDP balance lookup exceeded 7 seconds",
+            ):
+                CdpAgentKitBackend().list_token_balances()
+
+        self.assertEqual(observed["timeout"], 7)
+
+    def test_balance_timeout_configuration_is_fail_closed(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"CDP_BALANCE_TIMEOUT_SECONDS": "0"},
+        ):
+            with self.assertRaisesRegex(ValueError, "must be between 5 and 120"):
+                CdpAgentKitBackend._balance_timeout_seconds()
+
     def test_adapter_repairs_only_cdp_148_liquidity_enum_validator(self) -> None:
         rebuilt: list[bool] = []
         validators = {"liquidity_available_validate_enum": object()}
