@@ -811,6 +811,12 @@ def run_live_cycle(
                 medium_decisions[(candidate.symbol, candidate.token_address)] = decision
         except (OSError, StrategyProfileError, ValueError) as error:
             raise ValueError(f"Strategy journal update failed: {error}") from error
+        execution_signals = tuple(
+            candidate
+            for candidate in execution_signals
+            if medium_decisions[(candidate.symbol, candidate.token_address)].action
+            in {"buy", "add", "sell"}
+        )
     else:
         execution_signals = _execution_eligible_signals(
             candidate_signals,
@@ -907,6 +913,7 @@ STATE: dict[str, object] = {
     "last_error": None,
     "last_error_message": None,
     "last_block_reason": None,
+    "consecutive_failures": 0,
     "correlation_id": None,
     "held_required": 0,
     "held_covered": 0,
@@ -926,9 +933,10 @@ STATE: dict[str, object] = {
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path not in {"/", "/health"}:
+        if self.path not in {"/", "/health", "/ready"}:
             self.send_error(404)
             return
+        readiness_code = _readiness_code()
         payload = json.dumps(
             {
                 "service": "crypto-trading-agent",
@@ -942,6 +950,8 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "last_error": STATE["last_error"],
                 "last_error_message": STATE["last_error_message"],
                 "last_block_reason": STATE["last_block_reason"],
+                "readiness_code": readiness_code,
+                "consecutive_failures": STATE["consecutive_failures"],
                 "correlation_id": STATE["correlation_id"],
                 "held_required": STATE["held_required"],
                 "held_covered": STATE["held_covered"],
@@ -951,9 +961,10 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "strategy_metrics": STATE["strategy_metrics"],
             }
         ).encode()
-        self.send_response(
-            503 if STATE["operational_status"] == "failed" else 200
-        )
+        status_code = 503 if STATE["operational_status"] == "failed" else 200
+        if self.path == "/ready" and STATE["trading_readiness"] != "ready":
+            status_code = 503
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
@@ -962,6 +973,29 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+def _readiness_code() -> str:
+    if STATE["operational_status"] == "failed":
+        return "INTEGRITY_FAILURE"
+    cycle_status = str(STATE["cycle_status"]).upper()
+    if cycle_status == "DISABLED":
+        return "WORKER_DISABLED"
+    if STATE["trading_readiness"] == "ready":
+        gates = STATE["safety_gates"]
+        if isinstance(gates, dict) and (
+            gates.get("live_trading_enabled") is True
+            and gates.get("executor_mode") == EXECUTOR_MODE_CONTROLLED_LIVE
+            and gates.get("kill_switch") == KILL_SWITCH_ARMED
+        ):
+            return "READY_LIVE"
+        return "READY_NON_LIVE"
+    return {
+        CYCLE_VALUATION_BLOCKED: "RESEARCH_OR_VALUATION_BLOCKED",
+        CYCLE_QUARANTINED: "QUARANTINED_HOLDINGS",
+        CYCLE_POLICY_BLOCKED: "POLICY_BLOCKED",
+        CYCLE_NO_FUNDS: "NO_GOVERNED_FUNDS",
+    }.get(cycle_status, "EXECUTION_LOCKED")
 
 
 def _authorized_capital() -> Decimal:
@@ -1056,6 +1090,7 @@ def _record_cycle_result(
             if result.trading_readiness == "blocked"
             else None
         ),
+        consecutive_failures=0,
         correlation_id=correlation_id,
         held_required=result.held_required,
         held_covered=result.held_covered,
@@ -1092,6 +1127,7 @@ def _record_cycle_failure(
     correlation_id: str,
 ) -> None:
     message = _safe_error_message(error)
+    consecutive_failures = int(STATE.get("consecutive_failures", 0)) + 1
     STATE.update(
         status="failed",
         operational_status="failed",
@@ -1101,6 +1137,7 @@ def _record_cycle_failure(
         last_error=type(error).__name__,
         last_error_message=message,
         last_block_reason=message,
+        consecutive_failures=consecutive_failures,
         correlation_id=correlation_id,
     )
     print(
@@ -1122,6 +1159,21 @@ def _cycle_sleep_seconds(interval: int, result: LiveCycleResult) -> int:
     if result.status == CYCLE_VALUATION_BLOCKED:
         return max(interval, VALUATION_OUTAGE_COOLDOWN_SECONDS)
     return interval
+
+
+def _provider_reinit_failures() -> int:
+    raw_value = os.getenv("LIVE_WORKER_PROVIDER_REINIT_FAILURES", "3").strip()
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            "LIVE_WORKER_PROVIDER_REINIT_FAILURES must be an integer."
+        ) from error
+    if not 1 <= value <= 20:
+        raise ValueError(
+            "LIVE_WORKER_PROVIDER_REINIT_FAILURES must be between 1 and 20."
+        )
+    return value
 
 
 def main() -> None:
@@ -1158,6 +1210,7 @@ def main() -> None:
     )
     if not 30 <= interval <= 3600:
         raise ValueError("LIVE_WORKER_INTERVAL_SECONDS must be between 30 and 3600.")
+    provider_reinit_failures = _provider_reinit_failures()
     while True:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
@@ -1227,6 +1280,31 @@ def main() -> None:
                 cycle_time=cycle_time,
                 correlation_id=correlation_id,
             )
+            failures = int(STATE["consecutive_failures"])
+            if failures % provider_reinit_failures == 0:
+                try:
+                    runtime = CdpLiveRuntime()
+                    print(
+                        json.dumps(
+                            {
+                                "event": "wallet_provider_reinitialized",
+                                "after_consecutive_failures": failures,
+                            }
+                        ),
+                        flush=True,
+                    )
+                except Exception as reinit_error:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "wallet_provider_reinitialize_failed",
+                                "after_consecutive_failures": failures,
+                                "error_type": type(reinit_error).__name__,
+                                "message": _safe_error_message(reinit_error),
+                            }
+                        ),
+                        flush=True,
+                    )
         time.sleep(cycle_delay)
 
 
