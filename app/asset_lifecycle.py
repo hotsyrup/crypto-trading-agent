@@ -18,6 +18,10 @@ from app.live_trading_config import BASE_USDC_ADDRESS
 
 SCHEMA_VERSION = 1
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
+# Swap rounding can leave sub-gwei token residues. Even at a hypothetical
+# $100,000 token price, this boundary is worth less than $0.0001 and cannot be
+# economically material inside the authorized $500 portfolio.
+MIN_GOVERNED_HOLDING_AMOUNT = Decimal("0.000000001")
 
 
 class AssetLifecycleError(RuntimeError):
@@ -354,6 +358,8 @@ class AssetLifecycle:
             if type(balance.decimals) is not int or not 0 <= balance.decimals <= 36:
                 raise AssetLifecycleError("Wallet inventory decimals are invalid.")
             if balance.amount == 0 or key == BASE_USDC_ADDRESS:
+                continue
+            if balance.amount < MIN_GOVERNED_HOLDING_AMOUNT:
                 continue
             record = records.get(key)
             if record is None:

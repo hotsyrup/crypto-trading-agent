@@ -6,6 +6,7 @@ from pathlib import Path
 
 from app.asset_lifecycle import AssetLifecycle, AssetLifecycleState
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
+from app.live_trading_config import BASE_USDC_ADDRESS
 from app.live_portfolio_worker import OnchainTokenBalance
 
 
@@ -36,6 +37,25 @@ def universe(symbol: str, address: str) -> GovernedAssetUniverse:
 
 
 class AssetLifecycleTests(unittest.TestCase):
+    def test_sub_gwei_swap_residue_does_not_require_valuation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = AssetLifecycle(Path(directory) / "asset_lifecycle.json")
+            result = lifecycle.evaluate(
+                universe("AERO", AERO_ADDRESS),
+                (
+                    OnchainTokenBalance(
+                        AERO_ADDRESS,
+                        Decimal("0.000000000136213225"),
+                        18,
+                    ),
+                ),
+                now=NOW,
+            )
+
+        self.assertEqual(result.held_governed, ())
+        self.assertEqual(result.quarantined, ())
+        self.assertEqual(result.required_research_contracts, (AERO_ADDRESS, BASE_USDC_ADDRESS))
+
     def test_held_governed_asset_survives_candidate_refresh_by_exact_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = AssetLifecycle(Path(directory) / "asset_lifecycle.json")
