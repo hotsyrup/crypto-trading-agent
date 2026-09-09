@@ -1,7 +1,9 @@
 # Medium-High Strategy Profile
 
-Status: implemented for validation and shadow comparison; not authorized for
-controlled-live activation.
+Status: authorized by the user on 2026-09-09 for bounded controlled-live
+operation with real assets. The user explicitly declined a seven-day
+shadow-only hold. Every deterministic execution, accounting, freshness,
+idempotency, asset, loss, drawdown, and kill-switch control remains mandatory.
 
 ## Configuration and rollback
 
