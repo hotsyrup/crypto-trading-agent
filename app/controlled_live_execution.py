@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass
@@ -50,6 +51,7 @@ USDC_RECEIPT_ROUNDING_TOLERANCE = Decimal("0.000025")
 # non-USDC allowance far below meaningful excess slippage.
 NON_USDC_RECEIPT_SLIPPAGE_BPS_TOLERANCE = Decimal("0.00001")
 TRANSACTION_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}")
+DEFAULT_CDP_BALANCE_TIMEOUT_SECONDS = 45
 
 STATUS_CONFIRMED = "CONFIRMED"
 STATUS_POLICY_REJECTED = "POLICY_REJECTED"
@@ -546,6 +548,24 @@ class CdpAgentKitBackend:
         raise RuntimeError("CDP backend cannot run inside an active event loop.")
 
     @staticmethod
+    def _balance_timeout_seconds() -> int:
+        raw_value = os.getenv(
+            "CDP_BALANCE_TIMEOUT_SECONDS",
+            str(DEFAULT_CDP_BALANCE_TIMEOUT_SECONDS),
+        ).strip()
+        try:
+            value = int(raw_value)
+        except ValueError as error:
+            raise ValueError(
+                "CDP_BALANCE_TIMEOUT_SECONDS must be an integer."
+            ) from error
+        if not 5 <= value <= 120:
+            raise ValueError(
+                "CDP_BALANCE_TIMEOUT_SECONDS must be between 5 and 120."
+            )
+        return value
+
+    @staticmethod
     def _gas_cost_eth(receipt: object) -> Decimal | None:
         def value(name: str) -> object:
             if isinstance(receipt, dict):
@@ -757,4 +777,12 @@ class CdpAgentKitBackend:
                         break
             return tuple(collected)
 
-        return self._run(load_balances())
+        timeout_seconds = self._balance_timeout_seconds()
+        try:
+            return self._run(
+                asyncio.wait_for(load_balances(), timeout=timeout_seconds)
+            )
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"CDP balance lookup exceeded {timeout_seconds} seconds."
+            ) from error
