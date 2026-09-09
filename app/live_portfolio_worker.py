@@ -909,6 +909,7 @@ STATE: dict[str, object] = {
     "operational_status": "starting",
     "trading_readiness": "blocked",
     "cycle_status": "starting",
+    "last_cycle_started_at": None,
     "last_cycle_at": None,
     "last_error": None,
     "last_error_message": None,
@@ -946,6 +947,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "operational_status": STATE["operational_status"],
                 "trading_readiness": STATE["trading_readiness"],
                 "cycle_status": STATE["cycle_status"],
+                "last_cycle_started_at": STATE["last_cycle_started_at"],
                 "last_cycle_at": STATE["last_cycle_at"],
                 "last_error": STATE["last_error"],
                 "last_error_message": STATE["last_error_message"],
@@ -1215,6 +1217,14 @@ def main() -> None:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
         cycle_delay = interval
+        STATE.update(
+            status="operational",
+            operational_status="operational",
+            trading_readiness="blocked",
+            cycle_status="loading_balances",
+            last_cycle_started_at=cycle_time.isoformat(),
+            correlation_id=correlation_id,
+        )
         try:
             live_config = load_live_trading_config()
             executor_config = load_executor_config()
