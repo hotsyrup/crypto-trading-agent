@@ -36,6 +36,7 @@ PROVIDER_REQUEST_SPACING_SECONDS = 3.25
 RESEARCH_SCHEMA_VERSION = 2
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
 LEGACY_RESEARCH_PATH = "/research/latest"
+V3_COMPAT_RESEARCH_PATH = "/research/v3/bundle"
 EQUITIES_RESEARCH_PATH = "/research/equities/latest"
 BITCOIN_NETWORK_RESEARCH_PATH = "/research/bitcoin-network/latest"
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
@@ -808,7 +809,11 @@ def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
     if path in {"/", "/health"}:
         return (200 if STATE["status"] != "failed" else 503, public_health_state())
     parsed = urlparse(path)
-    if parsed.path in {BASE_RESEARCH_PATH, LEGACY_RESEARCH_PATH}:
+    if parsed.path in {
+        BASE_RESEARCH_PATH,
+        LEGACY_RESEARCH_PATH,
+        V3_COMPAT_RESEARCH_PATH,
+    }:
         if parsed.path == LEGACY_RESEARCH_PATH and parsed.query:
             raise ValueError("Legacy research route does not accept coverage queries.")
         database_path = Path(
