@@ -1,5 +1,5 @@
 -r requirements.txt
 coinbase-agentkit==0.7.4
 eth-utils==6.0.0
-cdp-sdk==1.48.0
+cdp-sdk==1.48.1
 solana==0.36.10

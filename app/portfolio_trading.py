@@ -29,6 +29,17 @@ from app.controlled_live_execution import (
     execute_controlled_live_trade,
 )
 from app.live_trading_config import BASE_USDC_ADDRESS, LiveTradingConfig
+from app.strategy_profile import (
+    CAUTIOUS_PROFILE,
+    MEDIUM_HIGH_PROFILE,
+    STRATEGY_JOURNAL_PATH,
+    AssetCostBasis,
+    StrategyDecision,
+    StrategyProfileError,
+    append_strategy_decision,
+    evaluate_medium_high,
+    strategy_observations,
+)
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
     BASE_MAINNET_CHAIN_ID,
@@ -46,6 +57,8 @@ TAKE_PROFIT_PERCENT = Decimal("15")
 DEFAULT_SLIPPAGE_BPS = 50
 STRATEGY_ID = "research-ranked-base-portfolio"
 STRATEGY_VERSION = "1.0.0"
+MEDIUM_HIGH_STRATEGY_ID = "research-ranked-base-portfolio-medium-high"
+MEDIUM_HIGH_STRATEGY_VERSION = "1.0.0"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 USDC_QUANTUM = Decimal("0.000001")
 ALLOWED_RESEARCH_WARNINGS = {
@@ -80,6 +93,7 @@ class PortfolioPosition:
     token_balance: Decimal
     value_usdc: Decimal
     average_entry_price_usdc: Decimal
+    cost_basis_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -308,6 +322,10 @@ def execute_research_portfolio_signal(
     live_config: LiveTradingConfig | None = None,
     executor_config: ExecutorConfig | None = None,
     agent_commerce_research_gate: AgentCommerceResearchGate | None = None,
+    strategy_profile: str = CAUTIOUS_PROFILE,
+    cost_bases: dict[str, AssetCostBasis] | None = None,
+    strategy_journal_path: Path = STRATEGY_JOURNAL_PATH,
+    precomputed_strategy_decision: StrategyDecision | None = None,
 ) -> ControlledLiveResult:
     """Turn one ranked research signal into one fully audited spot attempt.
 
@@ -377,11 +395,17 @@ def execute_research_portfolio_signal(
     )
     if any(not value.is_finite() for value in decimals) or signal.price_usd <= 0:
         return _policy_rejected("Research signal contains invalid numeric values.")
-    if (
+    entry_liquidity_failure = (
         signal.liquidity_usd < MINIMUM_LIQUIDITY_USD
         or signal.daily_volume_usd < MINIMUM_DAILY_VOLUME_USD
         or signal.liquidity_usd < asset.liquidity_usd / Decimal("2")
-    ):
+    )
+    if strategy_profile == MEDIUM_HIGH_PROFILE and position is not None:
+        if signal.liquidity_usd < Decimal("25000"):
+            return _policy_rejected(
+                "Held-position exit liquidity is below the economic safety floor."
+            )
+    elif entry_liquidity_failure:
         return _policy_rejected("Research liquidity or volume is below policy.")
     if (
         type(signal.buys_h24) is not int
@@ -392,11 +416,56 @@ def execute_research_portfolio_signal(
         return _policy_rejected("Research transaction counts are invalid.")
 
     current_position = position.value_usdc if position is not None else Decimal("0")
-    buy_signal = (
-        signal.change_h6_percent > 0
-        and signal.change_h24_percent > 0
-        and signal.buys_h24 > signal.sells_h24
-    )
+    entry_score: int | None = None
+    exit_reason: str | None = None
+    sell_fraction = Decimal("1")
+    medium_decision = None
+    if strategy_profile == MEDIUM_HIGH_PROFILE:
+        address = (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+        resolved_bases = cost_bases or {}
+        try:
+            if precomputed_strategy_decision is not None:
+                if precomputed_strategy_decision.profile != MEDIUM_HIGH_PROFILE:
+                    raise StrategyProfileError(
+                        "Precomputed strategy decision has the wrong profile."
+                    )
+                medium_decision = precomputed_strategy_decision
+            else:
+                observations = strategy_observations(
+                    address,
+                    profile=MEDIUM_HIGH_PROFILE,
+                    path=strategy_journal_path,
+                )
+                medium_decision = evaluate_medium_high(
+                    signal,
+                    position=position,
+                    basis=resolved_bases.get(address),
+                    all_bases=resolved_bases,
+                    baseline_volume_usd=asset.daily_volume_usd,
+                    portfolio_value_usdc=portfolio.total_value_usdc,
+                    observations=observations,
+                    now=current_time,
+                )
+                append_strategy_decision(
+                    signal=signal,
+                    decision=medium_decision,
+                    path=strategy_journal_path,
+                    recorded_at=current_time,
+                )
+        except (OSError, StrategyProfileError, ValueError) as error:
+            return _policy_rejected(f"Strategy state or cost basis failed: {error}")
+        entry_score = medium_decision.entry_score
+        exit_reason = medium_decision.exit_reason
+        sell_fraction = medium_decision.sell_fraction
+        buy_signal = medium_decision.action in {"buy", "add"}
+    elif strategy_profile == CAUTIOUS_PROFILE:
+        buy_signal = (
+            signal.change_h6_percent > 0
+            and signal.change_h24_percent > 0
+            and signal.buys_h24 > signal.sells_h24
+        )
+    else:
+        return _policy_rejected("Strategy profile is not supported.")
     stop_or_take_profit = bool(
         position is not None
         and _finite_positive(position.average_entry_price_usdc)
@@ -409,16 +478,30 @@ def execute_research_portfolio_signal(
             * (Decimal("1") + TAKE_PROFIT_PERCENT / Decimal("100"))
         )
     )
-    sell_signal = bool(
-        position is not None
-        and (
-            (
-                signal.change_h6_percent < 0
-                and signal.change_h24_percent < 0
+    if medium_decision is not None:
+        sell_signal = medium_decision.action == "sell"
+    else:
+        sell_signal = bool(
+            position is not None
+            and (
+                (
+                    signal.change_h6_percent < 0
+                    and signal.change_h24_percent < 0
+                )
+                or stop_or_take_profit
             )
-            or stop_or_take_profit
         )
-    )
+        if sell_signal:
+            if stop_or_take_profit:
+                exit_reason = (
+                    "legacy_stop_loss"
+                    if signal.price_usd
+                    <= position.average_entry_price_usdc
+                    * (Decimal("1") - STOP_LOSS_PERCENT / Decimal("100"))
+                    else "legacy_take_profit"
+                )
+            else:
+                exit_reason = "legacy_dual_momentum_reversal"
 
     if sell_signal:
         if position is None:
@@ -429,7 +512,8 @@ def execute_research_portfolio_signal(
         ):
             return _policy_rejected("Verified sell position is invalid.")
         side = "SELL"
-        notional = min(MAX_TRADE_NOTIONAL_USDC, position.value_usdc).quantize(
+        requested_value = position.value_usdc * sell_fraction
+        notional = min(MAX_TRADE_NOTIONAL_USDC, requested_value).quantize(
             USDC_QUANTUM,
             rounding=ROUND_DOWN,
         )
@@ -460,15 +544,29 @@ def execute_research_portfolio_signal(
         side = "BUY"
         from_amount = notional
     else:
+        if medium_decision is not None:
+            reason = medium_decision.exit_reason or medium_decision.classification
+            return _policy_rejected(
+                f"Medium-high strategy produced no executable action: {reason}."
+            )
         return _policy_rejected("Research signal does not meet buy or sell rules.")
 
-    intent_seed = (
-        f"portfolio-intent-v2:{signal.packet_id}:{universe.snapshot_sha256}:{side}:"
-        f"{asset.symbol}:{asset.token_address}"
-    )
+    if strategy_profile == MEDIUM_HIGH_PROFILE:
+        intent_seed = (
+            f"portfolio-intent-v3:{strategy_profile}:{signal.packet_id}:"
+            f"{universe.snapshot_sha256}:{side}:{asset.symbol}:{asset.token_address}:"
+            f"{entry_score}:{exit_reason}:{notional}"
+        )
+    else:
+        intent_seed = (
+            f"portfolio-intent-v2:{signal.packet_id}:{universe.snapshot_sha256}:{side}:"
+            f"{asset.symbol}:{asset.token_address}"
+        )
     intent_id = hashlib.sha256(intent_seed.encode()).hexdigest()
     paid_research_ref: str | None = None
-    if agent_commerce_research_gate is not None:
+    if agent_commerce_research_gate is not None and not (
+        strategy_profile == MEDIUM_HIGH_PROFILE and side == "SELL"
+    ):
         try:
             gate_decision = agent_commerce_research_gate.evaluate(
                 candidate_for_trade(
@@ -498,12 +596,22 @@ def execute_research_portfolio_signal(
             f"{portfolio.total_value_usdc}:{portfolio.usdc_balance}"
         ),
     ]
+    if entry_score is not None:
+        source_refs.append(f"entry-score:{entry_score}")
     if paid_research_ref is not None:
         source_refs.append(paid_research_ref)
     intent = TradeIntent(
         intent_id=intent_id,
-        strategy_id=STRATEGY_ID,
-        strategy_version=STRATEGY_VERSION,
+        strategy_id=(
+            MEDIUM_HIGH_STRATEGY_ID
+            if strategy_profile == MEDIUM_HIGH_PROFILE
+            else STRATEGY_ID
+        ),
+        strategy_version=(
+            MEDIUM_HIGH_STRATEGY_VERSION
+            if strategy_profile == MEDIUM_HIGH_PROFILE
+            else STRATEGY_VERSION
+        ),
         side=side,
         asset_symbol=asset.symbol,
         asset_token_address=asset.token_address,
@@ -519,6 +627,9 @@ def execute_research_portfolio_signal(
         market_data_observed_at=signal.observed_at,
         created_at=signal.observed_at,
         source_refs=tuple(source_refs),
+        strategy_profile=strategy_profile,
+        entry_score=entry_score,
+        exit_reason=exit_reason if side == "SELL" else None,
     )
     asset_token = asset.token_address or NATIVE_ETH_ADDRESS
     swap = ApprovedSwap(

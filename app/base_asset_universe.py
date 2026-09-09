@@ -170,7 +170,7 @@ def load_governed_asset_universe(
     *,
     now: datetime | None = None,
 ) -> GovernedAssetUniverse:
-    """Load one reviewed top-25 snapshot and expose only live-eligible assets.
+    """Load one reviewed, strictly qualified top-25 snapshot.
 
     Ranking data proposes the universe; exact identity, freshness, liquidity,
     volume, and pool-age rules determine which entries can cross this interface.
@@ -213,9 +213,12 @@ def load_governed_asset_universe(
         raise AssetUniverseError("Governed asset snapshot is from the future.")
 
     raw_assets = payload.get("assets")
-    if not isinstance(raw_assets, list) or len(raw_assets) != MAX_TRADABLE_ASSETS:
+    if (
+        not isinstance(raw_assets, list)
+        or not 1 <= len(raw_assets) <= MAX_TRADABLE_ASSETS
+    ):
         raise AssetUniverseError(
-            "Governed asset snapshot must contain exactly 25 assets."
+            "Governed asset snapshot must contain between 1 and 25 assets."
         )
     parsed = tuple(_asset(item, now=current_time) for item in raw_assets)
     ranks = [item.rank for item in parsed]
@@ -223,6 +226,8 @@ def load_governed_asset_universe(
     addresses = [item.token_address for item in parsed if item.token_address is not None]
     if len(set(ranks)) != len(ranks):
         raise AssetUniverseError("Governed asset ranks must be unique.")
+    if ranks != list(range(1, len(parsed) + 1)):
+        raise AssetUniverseError("Governed asset ranks must be contiguous from 1.")
     if len(set(symbols)) != len(symbols):
         raise AssetUniverseError("Governed asset symbols must be unique.")
     if len(set(addresses)) != len(addresses):
@@ -242,9 +247,9 @@ def load_governed_asset_universe(
             key=lambda item: item.rank,
         )
     )
-    if len(eligible) != MAX_TRADABLE_ASSETS:
+    if len(eligible) != len(parsed):
         raise AssetUniverseError(
-            "Governed asset snapshot must contain exactly 25 live-eligible assets."
+            "Every governed asset in the snapshot must remain live-eligible."
         )
     return GovernedAssetUniverse(
         observed_at=observed_at,

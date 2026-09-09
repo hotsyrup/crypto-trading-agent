@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -7,7 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -16,7 +17,6 @@ from urllib.error import HTTPError, URLError
 
 from app.asset_lifecycle import (
     AssetLifecycle,
-    AssetLifecycleState,
     HistoricalGovernedContract,
     LifecycleAsset,
 )
@@ -54,8 +54,25 @@ from app.portfolio_trading import (
     valuation_signal_from_packet,
 )
 from app.research_feed import get_research_payload
+from app.strategy_profile import (
+    CAUTIOUS_PROFILE,
+    MEDIUM_HIGH_PROFILE,
+    STRATEGY_JOURNAL_PATH,
+    StrategyDecision,
+    StrategyProfileError,
+    append_strategy_decision,
+    evaluate_cautious,
+    evaluate_medium_high,
+    load_strategy_profile,
+    read_strategy_events,
+    reconstruct_cost_basis,
+    strategy_metrics,
+    strategy_observations,
+)
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
+    EXECUTOR_MODE_CONTROLLED_LIVE,
+    KILL_SWITCH_ARMED,
     MAX_TRADING_CAPITAL_USDC,
     ExecutorConfig,
     load_executor_config,
@@ -68,6 +85,7 @@ CYCLE_NO_SIGNAL = "NO_ELIGIBLE_SIGNAL"
 CYCLE_VALUATION_BLOCKED = "VALUATION_BLOCKED"
 CYCLE_QUARANTINED = "QUARANTINED_HOLDINGS"
 LIVE_WORKER_INTERVAL_SECONDS = 60
+VALUATION_OUTAGE_COOLDOWN_SECONDS = 120
 RESEARCH_ENVELOPE_FIELDS = {
     "service",
     "schema_version",
@@ -113,7 +131,7 @@ def _research_signals(
     universe: GovernedAssetUniverse,
     *,
     now: datetime,
-    retained_contracts: frozenset[str] = frozenset(),
+    valuation_contracts: frozenset[str] = frozenset(),
 ) -> tuple[ResearchSignal, ...]:
     if not isinstance(payload, dict) or set(payload) != RESEARCH_ENVELOPE_FIELDS:
         raise ValueError("Research envelope fields are invalid.")
@@ -145,7 +163,7 @@ def _research_signals(
             else ""
         )
         try:
-            if contract in retained_contracts:
+            if contract in valuation_contracts:
                 signal = valuation_signal_from_packet(packet, contract, now=now)
                 if contract == RESEARCH_WETH_ADDRESS:
                     signal = replace(signal, token_address=None)
@@ -165,6 +183,22 @@ def _research_signals(
     return tuple(accepted.values())
 
 
+def _research_receipt_time(cycle_time: datetime, elapsed_seconds: float) -> datetime:
+    if elapsed_seconds < 0:
+        raise ValueError("Research request elapsed time cannot be negative.")
+    return cycle_time + timedelta(seconds=elapsed_seconds)
+
+
+def _parallel_strategy_profiles(active_profile: str, enabled: bool) -> tuple[str, ...]:
+    if not enabled:
+        return ()
+    if active_profile == CAUTIOUS_PROFILE:
+        return (CAUTIOUS_PROFILE, MEDIUM_HIGH_PROFILE)
+    if active_profile == MEDIUM_HIGH_PROFILE:
+        return (CAUTIOUS_PROFILE,)
+    raise ValueError("Active strategy profile is invalid.")
+
+
 def _verified_portfolio(
     balances: tuple[OnchainTokenBalance, ...],
     signals: tuple[ResearchSignal, ...],
@@ -174,6 +208,7 @@ def _verified_portfolio(
     native_gas_reserve_eth: Decimal,
     now: datetime,
     lifecycle_assets: tuple[LifecycleAsset, ...] | None = None,
+    cost_bases: dict[str, object] | None = None,
 ) -> VerifiedPortfolio:
     if not native_gas_reserve_eth.is_finite() or native_gas_reserve_eth < 0:
         raise ValueError("Native gas reserve must be finite and non-negative.")
@@ -228,13 +263,33 @@ def _verified_portfolio(
         if signal is None:
             raise ValueError("A held governed asset has no fresh valuation signal.")
         value = spendable_amount * signal.price_usd
+        basis = cost_bases.get(address) if cost_bases is not None else None
+        basis_quantity = (
+            basis.confirmed_quantity if basis is not None else Decimal("0")
+        )
+        quantum = Decimal(1).scaleb(-balance.decimals)
+        basis_tolerance = max(
+            quantum * Decimal("10"),
+            basis_quantity * Decimal("0.001"),
+        )
+        basis_verified = bool(
+            basis is not None
+            and basis.verified
+            and basis_quantity > 0
+            and abs(spendable_amount - basis_quantity) <= basis_tolerance
+        )
         positions.append(
             PortfolioPosition(
                 symbol=signal.symbol,
                 token_address=signal.token_address,
                 token_balance=spendable_amount,
                 value_usdc=value,
-                average_entry_price_usdc=signal.price_usd,
+                average_entry_price_usdc=(
+                    basis.average_entry_price_usdc
+                    if basis_verified
+                    else Decimal("0")
+                ),
+                cost_basis_verified=basis_verified,
             )
         )
     return VerifiedPortfolio(
@@ -280,12 +335,56 @@ def _ordered_signals(
     signals: tuple[ResearchSignal, ...],
     portfolio: VerifiedPortfolio,
     universe: GovernedAssetUniverse,
+    *,
+    strategy_profile: str = CAUTIOUS_PROFILE,
+    cost_bases: dict[str, object] | None = None,
+    strategy_journal_path: Path = STRATEGY_JOURNAL_PATH,
+    now: datetime | None = None,
 ) -> tuple[ResearchSignal, ...]:
     held = {(item.symbol, item.token_address) for item in portfolio.positions}
     rank = {(item.symbol, item.token_address): item.rank for item in universe.assets}
 
     def priority(signal: ResearchSignal) -> tuple[int, Decimal, int]:
         identity = (signal.symbol, signal.token_address)
+        if strategy_profile == MEDIUM_HIGH_PROFILE:
+            position = next(
+                (
+                    item
+                    for item in portfolio.positions
+                    if (item.symbol, item.token_address) == identity
+                ),
+                None,
+            )
+            address = (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+            decision = evaluate_medium_high(
+                signal,
+                position=position,
+                basis=(cost_bases or {}).get(address),
+                all_bases=cost_bases or {},
+                baseline_volume_usd=universe.require(
+                    signal.symbol,
+                    signal.token_address,
+                ).daily_volume_usd,
+                portfolio_value_usdc=portfolio.total_value_usdc,
+                observations=strategy_observations(
+                    address,
+                    profile=MEDIUM_HIGH_PROFILE,
+                    path=strategy_journal_path,
+                ),
+                now=now or portfolio.observed_at,
+            )
+            category = (
+                0
+                if decision.action == "sell"
+                else 1
+                if decision.action in {"buy", "add"}
+                else 2
+            )
+            return (
+                category,
+                Decimal(-decision.entry_score),
+                rank.get(identity, 10_000),
+            )
         exit_signal = (
             identity in held
             and signal.change_h6_percent < 0
@@ -301,6 +400,39 @@ def _ordered_signals(
         return category, momentum, rank.get(identity, 10_000)
 
     return tuple(sorted(signals, key=priority))
+
+
+def _execution_universe(
+    current: GovernedAssetUniverse,
+    lifecycle_assets: tuple[LifecycleAsset, ...],
+) -> GovernedAssetUniverse:
+    assets = list(current.assets)
+    known = {(item.symbol, item.token_address) for item in assets}
+    retained = sorted(
+        (
+            item.asset
+            for item in lifecycle_assets
+            if item.asset is not None
+            and (item.asset.symbol, item.asset.token_address) not in known
+        ),
+        key=lambda item: ((item.token_address or NATIVE_ETH_ADDRESS), item.symbol),
+    )
+    assets.extend(retained)
+    if not retained:
+        return current
+    retained_ids = ":".join(
+        f"{item.symbol}:{item.token_address or NATIVE_ETH_ADDRESS}"
+        for item in retained
+    )
+    digest = hashlib.sha256(
+        f"{current.snapshot_sha256}:retained:{retained_ids}".encode()
+    ).hexdigest()
+    return GovernedAssetUniverse(
+        observed_at=current.observed_at,
+        source=f"{current.source}+retained-exit-only",
+        snapshot_sha256=digest,
+        assets=tuple(assets),
+    )
 
 
 def _execution_eligible_signals(
@@ -332,6 +464,9 @@ def run_live_cycle(
     executor_config: ExecutorConfig | None = None,
     agent_commerce_research_gate: AgentCommerceResearchGate | None = None,
     lifecycle_registry_path: Path | None = None,
+    strategy_profile: str = CAUTIOUS_PROFILE,
+    strategy_journal_path: Path = STRATEGY_JOURNAL_PATH,
+    parallel_shadow: bool = False,
 ) -> LiveCycleResult:
     """Verify live inputs and make at most one governed execution attempt."""
 
@@ -367,7 +502,15 @@ def run_live_cycle(
         now=current_time,
         historical_governance=_historical_governance(live_audit_path),
     )
-    retained_contracts = frozenset(
+    execution_universe = _execution_universe(
+        resolved_universe,
+        lifecycle_assessment.held_governed,
+    )
+    try:
+        cost_bases = reconstruct_cost_basis(path=live_audit_path)
+    except (OSError, StrategyProfileError, ValueError) as error:
+        raise ValueError(f"Persistent cost basis is unavailable: {error}") from error
+    held_research_contracts = frozenset(
         (
             RESEARCH_WETH_ADDRESS
             if item.token_address is None
@@ -375,34 +518,72 @@ def run_live_cycle(
             else item.token_address.lower()
         )
         for item in lifecycle_assessment.held_governed
-        if item.state == AssetLifecycleState.RETAINED
     )
     try:
-        resolved_research = (
-            research_payload(lifecycle_assessment.required_research_contracts)
-            if callable(research_payload)
-            else research_payload
-        )
-        signals = _research_signals(
+        research_started = time.monotonic()
+        if callable(research_payload):
+            resolved_research = research_payload(
+                lifecycle_assessment.required_research_contracts
+            )
+            research_evaluated_at = _research_receipt_time(
+                current_time,
+                time.monotonic() - research_started,
+            )
+        else:
+            resolved_research = research_payload
+            research_evaluated_at = current_time
+        valuation_signals = _research_signals(
             resolved_research,
             resolved_universe,
-            now=current_time,
-            retained_contracts=retained_contracts,
+            now=research_evaluated_at,
+            valuation_contracts=held_research_contracts,
         )
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
+        trade_signals = _research_signals(
+            resolved_research,
+            resolved_universe,
+            now=research_evaluated_at,
+        )
+        current_time = research_evaluated_at
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as error:
         return LiveCycleResult(
             CYCLE_VALUATION_BLOCKED,
             wallet,
             runtime.network_id,
             Decimal("0"),
-            "Fresh exact-contract research evidence is unavailable or invalid.",
+            f"Research evidence blocked: {_safe_error_message(error)}",
             trading_readiness="blocked",
             held_required=len(lifecycle_assessment.held_governed),
             held_covered=0,
             quarantined_count=len(lifecycle_assessment.quarantined),
         )
+    lifecycle_identity = {
+        (item.token_address or NATIVE_ETH_ADDRESS).lower(): item
+        for item in lifecycle_assessment.held_governed
+    }
+    valuation_signals = tuple(
+        replace(
+            signal,
+            symbol=lifecycle_identity[
+                (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+            ].symbol,
+            token_address=lifecycle_identity[
+                (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+            ].token_address,
+        )
+        if (signal.token_address or NATIVE_ETH_ADDRESS).lower() in lifecycle_identity
+        else signal
+        for signal in valuation_signals
+    )
     signal_contracts = {
-        (signal.token_address or NATIVE_ETH_ADDRESS).lower() for signal in signals
+        (signal.token_address or NATIVE_ETH_ADDRESS).lower()
+        for signal in valuation_signals
     }
     missing_held = [
         item
@@ -423,12 +604,13 @@ def run_live_cycle(
         )
     portfolio = _verified_portfolio(
         balances,
-        signals,
+        valuation_signals,
         resolved_universe,
         wallet_address=wallet,
         native_gas_reserve_eth=native_gas_reserve_eth,
         now=current_time,
         lifecycle_assets=lifecycle_assessment.held_governed,
+        cost_bases=cost_bases,
     )
     if portfolio.total_value_usdc == 0:
         return LiveCycleResult(
@@ -449,19 +631,197 @@ def run_live_cycle(
         now=current_time,
     )
     candidate_contracts = frozenset(lifecycle_assessment.candidate_contracts)
-    execution_signals = _execution_eligible_signals(
-        tuple(
-            signal
-            for signal in signals
-            if (
-                RESEARCH_WETH_ADDRESS
-                if signal.token_address is None
-                else signal.token_address.lower()
-            )
-            in candidate_contracts
-        ),
-        resolved_universe,
+    candidate_signals = tuple(
+        signal
+        for signal in trade_signals
+        if (
+            RESEARCH_WETH_ADDRESS
+            if signal.token_address is None
+            else signal.token_address.lower()
+        )
+        in candidate_contracts
     )
+    held_identities = {
+        (item.symbol, item.token_address) for item in portfolio.positions
+    }
+    raw_medium_candidates = {
+        (signal.symbol, signal.token_address): signal
+        for signal in candidate_signals
+    }
+    for signal in valuation_signals:
+        if (signal.symbol, signal.token_address) in held_identities:
+            raw_medium_candidates[(signal.symbol, signal.token_address)] = signal
+    medium_candidates = {
+        identity: signal
+        for identity, signal in raw_medium_candidates.items()
+        if execution_universe.contains(signal.symbol, signal.token_address)
+    }
+    unroutable_medium = tuple(
+        signal
+        for identity, signal in raw_medium_candidates.items()
+        if identity not in medium_candidates
+    )
+    try:
+        evaluated_strategy_packets = {
+            (
+                str(event.get("profile")),
+                str(event.get("asset_token_address")),
+                str(event.get("packet_id")),
+            )
+            for event in read_strategy_events(path=strategy_journal_path)
+            if event.get("event") == "SIGNAL_EVALUATED"
+        }
+    except (OSError, StrategyProfileError, ValueError) as error:
+        raise ValueError(f"Strategy journal unavailable: {error}") from error
+
+    def strategy_packet_is_new(candidate: ResearchSignal, profile: str) -> bool:
+        address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
+        return (
+            profile,
+            address,
+            candidate.packet_id,
+        ) not in evaluated_strategy_packets
+
+    def medium_packet_is_new(candidate: ResearchSignal) -> bool:
+        return strategy_packet_is_new(candidate, MEDIUM_HIGH_PROFILE)
+
+    if parallel_shadow or strategy_profile == MEDIUM_HIGH_PROFILE:
+        try:
+            for candidate in unroutable_medium:
+                if not medium_packet_is_new(candidate):
+                    continue
+                append_strategy_decision(
+                    signal=candidate,
+                    decision=StrategyDecision(
+                        profile=MEDIUM_HIGH_PROFILE,
+                        entry_score=0,
+                        components={
+                            "momentum_h6": 0,
+                            "momentum_h24": 0,
+                            "transaction_imbalance": 0,
+                            "relative_volume": 0,
+                            "liquidity_impact": 0,
+                            "trend_consistency": 0,
+                            "exposure_history": 0,
+                        },
+                        classification="rejected",
+                        action="hold",
+                        exit_reason="governance_metadata_unavailable",
+                    ),
+                    path=strategy_journal_path,
+                    recorded_at=current_time,
+                )
+        except (OSError, StrategyProfileError, ValueError) as error:
+            raise ValueError(f"Strategy journal update failed: {error}") from error
+    parallel_profiles = _parallel_strategy_profiles(strategy_profile, parallel_shadow)
+    if parallel_profiles:
+        positions = {
+            (item.symbol, item.token_address): item for item in portfolio.positions
+        }
+        try:
+            if CAUTIOUS_PROFILE in parallel_profiles:
+                for candidate in candidate_signals:
+                    if not strategy_packet_is_new(candidate, CAUTIOUS_PROFILE):
+                        continue
+                    append_strategy_decision(
+                        signal=candidate,
+                        decision=evaluate_cautious(
+                            candidate,
+                            position=positions.get(
+                                (candidate.symbol, candidate.token_address)
+                            ),
+                            baseline_volume_usd=execution_universe.require(
+                                candidate.symbol,
+                                candidate.token_address,
+                            ).daily_volume_usd,
+                            portfolio_value_usdc=portfolio.total_value_usdc,
+                        ),
+                        path=strategy_journal_path,
+                        recorded_at=current_time,
+                    )
+            if MEDIUM_HIGH_PROFILE in parallel_profiles:
+                for candidate in medium_candidates.values():
+                    if not medium_packet_is_new(candidate):
+                        continue
+                    address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
+                    append_strategy_decision(
+                        signal=candidate,
+                        decision=evaluate_medium_high(
+                            candidate,
+                            position=positions.get(
+                                (candidate.symbol, candidate.token_address)
+                            ),
+                            basis=cost_bases.get(address),
+                            all_bases=cost_bases,
+                            baseline_volume_usd=execution_universe.require(
+                                candidate.symbol,
+                                candidate.token_address,
+                            ).daily_volume_usd,
+                            portfolio_value_usdc=portfolio.total_value_usdc,
+                            observations=strategy_observations(
+                                address,
+                                profile=MEDIUM_HIGH_PROFILE,
+                                path=strategy_journal_path,
+                            ),
+                            now=current_time,
+                        ),
+                        path=strategy_journal_path,
+                        recorded_at=current_time,
+                    )
+        except (OSError, StrategyProfileError, ValueError) as error:
+            raise ValueError(f"Parallel strategy shadow failed: {error}") from error
+    if strategy_profile == MEDIUM_HIGH_PROFILE:
+        execution_signals = tuple(
+            candidate
+            for candidate in medium_candidates.values()
+            if medium_packet_is_new(candidate)
+        )
+        positions = {
+            (item.symbol, item.token_address): item for item in portfolio.positions
+        }
+        medium_decisions: dict[tuple[str, str | None], StrategyDecision] = {}
+        try:
+            for candidate in execution_signals:
+                address = (candidate.token_address or NATIVE_ETH_ADDRESS).lower()
+                decision = evaluate_medium_high(
+                    candidate,
+                    position=positions.get(
+                        (candidate.symbol, candidate.token_address)
+                    ),
+                    basis=cost_bases.get(address),
+                    all_bases=cost_bases,
+                    baseline_volume_usd=execution_universe.require(
+                        candidate.symbol,
+                        candidate.token_address,
+                    ).daily_volume_usd,
+                    portfolio_value_usdc=portfolio.total_value_usdc,
+                    observations=strategy_observations(
+                        address,
+                        profile=MEDIUM_HIGH_PROFILE,
+                        path=strategy_journal_path,
+                    ),
+                    now=current_time,
+                )
+                append_strategy_decision(
+                    signal=candidate,
+                    decision=decision,
+                    path=strategy_journal_path,
+                    recorded_at=current_time,
+                )
+                medium_decisions[(candidate.symbol, candidate.token_address)] = decision
+        except (OSError, StrategyProfileError, ValueError) as error:
+            raise ValueError(f"Strategy journal update failed: {error}") from error
+        execution_signals = tuple(
+            candidate
+            for candidate in execution_signals
+            if medium_decisions[(candidate.symbol, candidate.token_address)].action
+            in {"buy", "add", "sell"}
+        )
+    else:
+        execution_signals = _execution_eligible_signals(
+            candidate_signals,
+            resolved_universe,
+        )
     if not execution_signals:
         return LiveCycleResult(
             CYCLE_NO_SIGNAL,
@@ -469,17 +829,31 @@ def run_live_cycle(
             runtime.network_id,
             portfolio.total_value_usdc,
             "No fresh governed research signal passes execution liquidity policy.",
-            trading_readiness="blocked",
+            trading_readiness=(
+                "ready"
+                if live_config.enabled
+                and executor_config.mode == EXECUTOR_MODE_CONTROLLED_LIVE
+                and executor_config.kill_switch_state == KILL_SWITCH_ARMED
+                else "blocked"
+            ),
             held_required=len(lifecycle_assessment.held_governed),
             held_covered=len(lifecycle_assessment.held_governed),
             quarantined_count=len(lifecycle_assessment.quarantined),
         )
-    selected = _ordered_signals(execution_signals, portfolio, resolved_universe)[0]
+    selected = _ordered_signals(
+        execution_signals,
+        portfolio,
+        execution_universe,
+        strategy_profile=strategy_profile,
+        cost_bases=cost_bases,
+        strategy_journal_path=strategy_journal_path,
+        now=current_time,
+    )[0]
     result: ControlledLiveResult = execute_research_portfolio_signal(
         selected,
         portfolio,
         risk,
-        resolved_universe,
+        execution_universe,
         runtime,
         decision_journal_path=decision_journal_path,
         live_audit_path=live_audit_path,
@@ -487,6 +861,14 @@ def run_live_cycle(
         live_config=live_config,
         executor_config=executor_config,
         agent_commerce_research_gate=agent_commerce_research_gate,
+        strategy_profile=strategy_profile,
+        cost_bases=cost_bases,
+        strategy_journal_path=strategy_journal_path,
+        precomputed_strategy_decision=(
+            medium_decisions.get((selected.symbol, selected.token_address))
+            if strategy_profile == MEDIUM_HIGH_PROFILE
+            else None
+        ),
     )
     status = result.status
     if status == "POLICY_REJECTED":
@@ -530,6 +912,8 @@ STATE: dict[str, object] = {
     "last_cycle_at": None,
     "last_error": None,
     "last_error_message": None,
+    "last_block_reason": None,
+    "consecutive_failures": 0,
     "correlation_id": None,
     "held_required": 0,
     "held_covered": 0,
@@ -539,16 +923,20 @@ STATE: dict[str, object] = {
         "executor_mode": "shadow_only",
         "kill_switch": "halted",
         "agent_commerce_research": "disabled",
+        "strategy_profile": CAUTIOUS_PROFILE,
+        "parallel_strategy_shadow": False,
     },
     "agent_commerce_research": research_public_status("disabled"),
+    "strategy_metrics": {},
 }
 
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path not in {"/", "/health"}:
+        if self.path not in {"/", "/health", "/ready"}:
             self.send_error(404)
             return
+        readiness_code = _readiness_code()
         payload = json.dumps(
             {
                 "service": "crypto-trading-agent",
@@ -561,17 +949,22 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "last_cycle_at": STATE["last_cycle_at"],
                 "last_error": STATE["last_error"],
                 "last_error_message": STATE["last_error_message"],
+                "last_block_reason": STATE["last_block_reason"],
+                "readiness_code": readiness_code,
+                "consecutive_failures": STATE["consecutive_failures"],
                 "correlation_id": STATE["correlation_id"],
                 "held_required": STATE["held_required"],
                 "held_covered": STATE["held_covered"],
                 "quarantined_count": STATE["quarantined_count"],
                 "safety_gates": STATE["safety_gates"],
                 "agent_commerce_research": STATE["agent_commerce_research"],
+                "strategy_metrics": STATE["strategy_metrics"],
             }
         ).encode()
-        self.send_response(
-            503 if STATE["operational_status"] == "failed" else 200
-        )
+        status_code = 503 if STATE["operational_status"] == "failed" else 200
+        if self.path == "/ready" and STATE["trading_readiness"] != "ready":
+            status_code = 503
+        self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
@@ -580,6 +973,29 @@ class HealthHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+
+def _readiness_code() -> str:
+    if STATE["operational_status"] == "failed":
+        return "INTEGRITY_FAILURE"
+    cycle_status = str(STATE["cycle_status"]).upper()
+    if cycle_status == "DISABLED":
+        return "WORKER_DISABLED"
+    if STATE["trading_readiness"] == "ready":
+        gates = STATE["safety_gates"]
+        if isinstance(gates, dict) and (
+            gates.get("live_trading_enabled") is True
+            and gates.get("executor_mode") == EXECUTOR_MODE_CONTROLLED_LIVE
+            and gates.get("kill_switch") == KILL_SWITCH_ARMED
+        ):
+            return "READY_LIVE"
+        return "READY_NON_LIVE"
+    return {
+        CYCLE_VALUATION_BLOCKED: "RESEARCH_OR_VALUATION_BLOCKED",
+        CYCLE_QUARANTINED: "QUARANTINED_HOLDINGS",
+        CYCLE_POLICY_BLOCKED: "POLICY_BLOCKED",
+        CYCLE_NO_FUNDS: "NO_GOVERNED_FUNDS",
+    }.get(cycle_status, "EXECUTION_LOCKED")
 
 
 def _authorized_capital() -> Decimal:
@@ -598,6 +1014,13 @@ def _worker_enabled() -> bool:
     value = os.getenv("LIVE_WORKER_ENABLED", "false").strip().lower()
     if value not in {"true", "false"}:
         raise ValueError("LIVE_WORKER_ENABLED must be true or false.")
+    return value == "true"
+
+
+def _parallel_shadow_enabled() -> bool:
+    value = os.getenv("TRADING_PARALLEL_SHADOW_ENABLED", "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise ValueError("TRADING_PARALLEL_SHADOW_ENABLED must be true or false.")
     return value == "true"
 
 
@@ -626,12 +1049,16 @@ def _safety_gates(
     live_config: LiveTradingConfig,
     executor_config: ExecutorConfig,
     research_gate: AgentCommerceResearchGate,
+    strategy_profile: str,
+    parallel_shadow: bool,
 ) -> dict[str, object]:
     return {
         "live_trading_enabled": live_config.enabled,
         "executor_mode": executor_config.mode,
         "kill_switch": executor_config.kill_switch_state,
         "agent_commerce_research": research_gate.mode,
+        "strategy_profile": strategy_profile,
+        "parallel_strategy_shadow": parallel_shadow,
     }
 
 
@@ -648,6 +1075,7 @@ def _record_cycle_result(
     cycle_time: datetime,
     correlation_id: str,
     safety_gates: dict[str, object],
+    metrics: dict[str, object] | None = None,
 ) -> None:
     STATE.update(
         status="operational",
@@ -657,11 +1085,18 @@ def _record_cycle_result(
         last_cycle_at=cycle_time.isoformat(),
         last_error=None,
         last_error_message=None,
+        last_block_reason=(
+            _safe_error_message(ValueError(result.reason))
+            if result.trading_readiness == "blocked"
+            else None
+        ),
+        consecutive_failures=0,
         correlation_id=correlation_id,
         held_required=result.held_required,
         held_covered=result.held_covered,
         quarantined_count=result.quarantined_count,
         safety_gates=safety_gates,
+        strategy_metrics=metrics or {},
     )
     print(
         json.dumps(
@@ -674,6 +1109,11 @@ def _record_cycle_result(
                 "held_covered": result.held_covered,
                 "quarantined_count": result.quarantined_count,
                 "transaction_submitted": result.transaction_hash is not None,
+                "block_reason": (
+                    _safe_error_message(ValueError(result.reason))
+                    if result.trading_readiness == "blocked"
+                    else None
+                ),
             }
         ),
         flush=True,
@@ -687,6 +1127,7 @@ def _record_cycle_failure(
     correlation_id: str,
 ) -> None:
     message = _safe_error_message(error)
+    consecutive_failures = int(STATE.get("consecutive_failures", 0)) + 1
     STATE.update(
         status="failed",
         operational_status="failed",
@@ -695,6 +1136,8 @@ def _record_cycle_failure(
         last_cycle_at=cycle_time.isoformat(),
         last_error=type(error).__name__,
         last_error_message=message,
+        last_block_reason=message,
+        consecutive_failures=consecutive_failures,
         correlation_id=correlation_id,
     )
     print(
@@ -710,6 +1153,27 @@ def _record_cycle_failure(
         ),
         flush=True,
     )
+
+
+def _cycle_sleep_seconds(interval: int, result: LiveCycleResult) -> int:
+    if result.status == CYCLE_VALUATION_BLOCKED:
+        return max(interval, VALUATION_OUTAGE_COOLDOWN_SECONDS)
+    return interval
+
+
+def _provider_reinit_failures() -> int:
+    raw_value = os.getenv("LIVE_WORKER_PROVIDER_REINIT_FAILURES", "3").strip()
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(
+            "LIVE_WORKER_PROVIDER_REINIT_FAILURES must be an integer."
+        ) from error
+    if not 1 <= value <= 20:
+        raise ValueError(
+            "LIVE_WORKER_PROVIDER_REINIT_FAILURES must be between 1 and 20."
+        )
+    return value
 
 
 def main() -> None:
@@ -746,16 +1210,22 @@ def main() -> None:
     )
     if not 30 <= interval <= 3600:
         raise ValueError("LIVE_WORKER_INTERVAL_SECONDS must be between 30 and 3600.")
+    provider_reinit_failures = _provider_reinit_failures()
     while True:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
+        cycle_delay = interval
         try:
             live_config = load_live_trading_config()
             executor_config = load_executor_config()
+            strategy_profile = load_strategy_profile()
+            parallel_shadow = _parallel_shadow_enabled()
             safety_gates = _safety_gates(
                 live_config,
                 executor_config,
                 research_gate,
+                strategy_profile,
+                parallel_shadow,
             )
             result = run_live_cycle(
                 runtime=runtime,
@@ -778,20 +1248,64 @@ def main() -> None:
                 live_config=live_config,
                 executor_config=executor_config,
                 agent_commerce_research_gate=research_gate,
+                strategy_profile=strategy_profile,
+                strategy_journal_path=Path(
+                    os.getenv(
+                        "TRADING_STRATEGY_JOURNAL_PATH",
+                        str(STRATEGY_JOURNAL_PATH),
+                    )
+                ),
+                parallel_shadow=parallel_shadow,
             )
             _record_cycle_result(
                 result,
                 cycle_time=cycle_time,
                 correlation_id=correlation_id,
                 safety_gates=safety_gates,
+                metrics=strategy_metrics(
+                    strategy_journal_path=Path(
+                        os.getenv(
+                            "TRADING_STRATEGY_JOURNAL_PATH",
+                            str(STRATEGY_JOURNAL_PATH),
+                        )
+                    ),
+                    live_audit_path=Path("data/live_execution_audit.jsonl"),
+                    risk_journal_path=Path("data/live_portfolio_risk.jsonl"),
+                ),
             )
+            cycle_delay = _cycle_sleep_seconds(interval, result)
         except Exception as error:
             _record_cycle_failure(
                 error,
                 cycle_time=cycle_time,
                 correlation_id=correlation_id,
             )
-        time.sleep(interval)
+            failures = int(STATE["consecutive_failures"])
+            if failures % provider_reinit_failures == 0:
+                try:
+                    runtime = CdpLiveRuntime()
+                    print(
+                        json.dumps(
+                            {
+                                "event": "wallet_provider_reinitialized",
+                                "after_consecutive_failures": failures,
+                            }
+                        ),
+                        flush=True,
+                    )
+                except Exception as reinit_error:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "wallet_provider_reinitialize_failed",
+                                "after_consecutive_failures": failures,
+                                "error_type": type(reinit_error).__name__,
+                                "message": _safe_error_message(reinit_error),
+                            }
+                        ),
+                        flush=True,
+                    )
+        time.sleep(cycle_delay)
 
 
 if __name__ == "__main__":

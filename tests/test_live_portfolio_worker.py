@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from http.server import HTTPServer
 from io import StringIO
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from app.base_asset_universe import GovernedAsset, GovernedAssetUniverse
@@ -20,6 +21,7 @@ from app.controlled_live_execution import (
 )
 from app.live_portfolio_worker import (
     CYCLE_NO_FUNDS,
+    CYCLE_NO_SIGNAL,
     CYCLE_POLICY_BLOCKED,
     CYCLE_VALUATION_BLOCKED,
     HealthHandler,
@@ -28,6 +30,10 @@ from app.live_portfolio_worker import (
     STATE,
     _record_cycle_failure,
     _record_cycle_result,
+    _readiness_code,
+    _cycle_sleep_seconds,
+    _parallel_strategy_profiles,
+    _research_receipt_time,
     _verified_portfolio,
     run_live_cycle,
 )
@@ -35,6 +41,7 @@ from app.live_execution_journal import reserve_live_execution
 from app.live_trading_config import BASE_USDC_ADDRESS, load_live_trading_config
 from app.research_agent import build_packet
 from app.portfolio_trading import ResearchSignal
+from app.strategy_profile import MEDIUM_HIGH_PROFILE
 from app.trading_executor import (
     AUTHORIZED_TREASURY_ADDRESS,
     EXECUTOR_MODE_CONTROLLED_LIVE,
@@ -149,6 +156,90 @@ class Runtime:
 
 
 class LivePortfolioWorkerTests(unittest.TestCase):
+    def test_parallel_shadow_does_not_duplicate_active_medium_high_profile(self) -> None:
+        self.assertEqual(
+            _parallel_strategy_profiles(MEDIUM_HIGH_PROFILE, True),
+            ("cautious_v1",),
+        )
+        self.assertEqual(
+            _parallel_strategy_profiles("cautious_v1", True),
+            ("cautious_v1", MEDIUM_HIGH_PROFILE),
+        )
+        self.assertEqual(_parallel_strategy_profiles(MEDIUM_HIGH_PROFILE, False), ())
+
+    def test_research_receipt_time_includes_remote_request_duration(self) -> None:
+        self.assertEqual(
+            _research_receipt_time(NOW, 96.25),
+            NOW + timedelta(seconds=96.25),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            _research_receipt_time(NOW, -1)
+
+    def test_parallel_shadow_does_not_reevaluate_same_packet_after_portfolio_change(self) -> None:
+        first_runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+        second_runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("50"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+        executor_config = ExecutorConfig(
+            mode=EXECUTOR_MODE_SHADOW_ONLY,
+            kill_switch_state=KILL_SWITCH_HALTED,
+            max_data_age_seconds=120,
+            max_future_skew_seconds=30,
+        )
+
+        first = run_live_cycle(
+            runtime=first_runtime,
+            research_payload=research_payload(),
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+            live_config=load_live_trading_config(),
+            executor_config=executor_config,
+            strategy_profile=MEDIUM_HIGH_PROFILE,
+            parallel_shadow=True,
+        )
+        second = run_live_cycle(
+            runtime=second_runtime,
+            research_payload=research_payload(),
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW + timedelta(minutes=1),
+            live_config=load_live_trading_config(),
+            executor_config=executor_config,
+            strategy_profile=MEDIUM_HIGH_PROFILE,
+            parallel_shadow=True,
+        )
+
+        self.assertEqual(first.status, CYCLE_NO_SIGNAL, first.reason)
+        self.assertEqual(second.status, CYCLE_NO_SIGNAL, second.reason)
+
+    def test_valuation_outage_uses_provider_cooldown_without_delaying_normal_cycles(self) -> None:
+        blocked = LiveCycleResult(
+            CYCLE_VALUATION_BLOCKED,
+            AUTHORIZED_TREASURY_ADDRESS,
+            CDP_NETWORK_ID,
+            Decimal("0"),
+            "research unavailable",
+        )
+        ready = replace(blocked, status=CYCLE_NO_SIGNAL)
+
+        self.assertEqual(_cycle_sleep_seconds(60, blocked), 120)
+        self.assertEqual(_cycle_sleep_seconds(60, ready), 60)
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
@@ -431,6 +522,116 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertFalse(self.risk.exists())
         self.assertEqual(runtime.requests, [])
 
+    def test_research_exception_is_reported_without_losing_fail_closed_state(self) -> None:
+        runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("10"), 18),
+            )
+        )
+
+        def unavailable(_contracts):
+            raise TimeoutError("provider deadline exceeded")
+
+        result = run_live_cycle(
+            runtime=runtime,
+            research_payload=unavailable,
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+        )
+
+        self.assertEqual(result.status, CYCLE_VALUATION_BLOCKED)
+        self.assertEqual(
+            result.reason,
+            "Research evidence blocked: provider deadline exceeded",
+        )
+        self.assertEqual(runtime.requests, [])
+
+    def test_held_candidate_uses_exact_price_without_requiring_entry_liquidity(self) -> None:
+        pair = {
+            "chainId": "base",
+            "dexId": "aerodrome",
+            "pairAddress": "0x" + "5" * 40,
+            "baseToken": {
+                "address": AERO_ADDRESS,
+                "name": "Aerodrome",
+                "symbol": "AERO",
+            },
+            "quoteToken": {
+                "address": BASE_USDC_ADDRESS,
+                "name": "USD Coin",
+                "symbol": "USDC",
+            },
+            "priceUsd": "0.50",
+            "liquidity": {"usd": "50000"},
+            "volume": {"h24": "200000", "h6": "50000"},
+            "priceChange": {"h24": "8", "h6": "3"},
+            "txns": {"h24": {"buys": 120, "sells": 90}},
+            "pairCreatedAt": 1704067200000,
+            "marketCap": "450000000",
+            "fdv": "500000000",
+            "boosts": {"active": 0},
+        }
+        packet = build_packet(
+            {
+                "contract_address": AERO_ADDRESS,
+                "discovery_source": "configured_watchlist",
+                "profile_url": None,
+                "marketing_influenced": False,
+                "promotion_type": None,
+            },
+            pair,
+            NOW - timedelta(seconds=10),
+            Decimal("100000"),
+            5,
+            1,
+        )
+        packet["is_stale"] = False
+        payload = research_payload()
+        payload["packets"] = [packet]
+
+        for amount in (Decimal("1"), Decimal("40")):
+            with self.subTest(amount=amount):
+                runtime = Runtime(
+                    (
+                        OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                        OnchainTokenBalance(AERO_ADDRESS, amount, 18),
+                    )
+                )
+                suffix = str(amount)
+                result = run_live_cycle(
+                    runtime=runtime,
+                    research_payload=payload,
+                    universe=universe(),
+                    authorized_capital_usdc=Decimal("500"),
+                    decision_journal_path=Path(self.temp_dir.name)
+                    / f"decisions-{suffix}.jsonl",
+                    live_audit_path=Path(self.temp_dir.name) / f"audit-{suffix}.jsonl",
+                    risk_journal_path=Path(self.temp_dir.name) / f"risk-{suffix}.jsonl",
+                    now=NOW,
+                    live_config=replace(load_live_trading_config(), enabled=True),
+                    executor_config=ExecutorConfig(
+                        mode=EXECUTOR_MODE_CONTROLLED_LIVE,
+                        kill_switch_state=KILL_SWITCH_ARMED,
+                        max_data_age_seconds=120,
+                        max_future_skew_seconds=30,
+                    ),
+                )
+
+                self.assertEqual(result.status, CYCLE_NO_SIGNAL, result.reason)
+                self.assertEqual(result.trading_readiness, "ready")
+                self.assertEqual(
+                    result.portfolio_value_usdc,
+                    Decimal("25") + amount * Decimal("0.50"),
+                )
+                self.assertEqual(result.held_required, 1)
+                self.assertEqual(result.held_covered, 1)
+                self.assertEqual(runtime.requests, [])
+
     def test_historical_live_journal_bootstraps_retained_contract_after_restart(self) -> None:
         reserve_live_execution(
             intent_id="historical-chip",
@@ -659,8 +860,41 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         self.assertEqual(payload["operational_status"], "operational")
         self.assertEqual(payload["trading_readiness"], "blocked")
         self.assertEqual(payload["cycle_status"], "valuation_blocked")
+        self.assertEqual(
+            payload["readiness_code"], "RESEARCH_OR_VALUATION_BLOCKED"
+        )
+        self.assertEqual(payload["last_block_reason"], "blocked")
         self.assertEqual(payload["held_required"], 2)
         self.assertEqual(payload["held_covered"], 1)
+
+    def test_readiness_endpoint_fails_closed_while_trading_is_blocked(self) -> None:
+        server = HTTPServer(("127.0.0.1", 0), HealthHandler)
+        thread = threading.Thread(target=server.handle_request)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as context:
+                urlopen(
+                    f"http://127.0.0.1:{server.server_port}/ready",
+                    timeout=2,
+                )
+            self.assertEqual(context.exception.code, 503)
+            thread.join(timeout=2)
+        finally:
+            server.server_close()
+
+    def test_readiness_code_reports_live_only_when_all_execution_gates_are_open(self) -> None:
+        STATE.update(
+            operational_status="operational",
+            trading_readiness="ready",
+            cycle_status="no_eligible_signal",
+            safety_gates={
+                "live_trading_enabled": True,
+                "executor_mode": EXECUTOR_MODE_CONTROLLED_LIVE,
+                "kill_switch": KILL_SWITCH_ARMED,
+            },
+        )
+
+        self.assertEqual(_readiness_code(), "READY_LIVE")
 
     def test_integrity_failure_has_nonblank_safe_structured_diagnostic(self) -> None:
         output = StringIO()

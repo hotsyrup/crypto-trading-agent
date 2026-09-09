@@ -217,6 +217,81 @@ class ControlledLiveExecutionTests(unittest.TestCase):
             asset_universe=universe,
         )
 
+    def execute_production_sell_receipt(
+        self,
+        *,
+        intent_id: str,
+        asset_symbol: str,
+        asset_token: str,
+        notional_usdc: str,
+        from_amount: str,
+        to_amount: str,
+        min_to_amount: str,
+        approval_evidence: bool,
+    ):
+        universe = GovernedAssetUniverse(
+            observed_at=NOW - timedelta(minutes=5),
+            source="production-receipt-regression-2026-09-01",
+            snapshot_sha256="b" * 64,
+            assets=(
+                GovernedAsset(
+                    rank=1,
+                    symbol=asset_symbol,
+                    name=f"Production receipt asset {asset_symbol}",
+                    token_address=asset_token,
+                    decimals=18,
+                    market_cap_usd=Decimal("100000000"),
+                    liquidity_usd=Decimal("1000000"),
+                    daily_volume_usd=Decimal("1000000"),
+                    oldest_pool_created_at=NOW - timedelta(days=365),
+                ),
+            ),
+        )
+        requested_amount = Decimal(from_amount)
+        approval = {
+            "approval_transaction_hash": "0x" + "b" * 64,
+            "approval_token": asset_token,
+            "approval_spender": PERMIT2_ADDRESS,
+            "approval_amount": requested_amount,
+        } if approval_evidence else {}
+        return self.execute(
+            trade=intent(
+                intent_id=intent_id,
+                strategy_id="production-receipt-regression",
+                asset_symbol=asset_symbol,
+                asset_token_address=asset_token,
+                notional_usdc=Decimal(notional_usdc),
+                current_position_usdc=Decimal("20"),
+                source_refs=(
+                    "production-receipt:2026-09-01",
+                    universe.snapshot_sha256,
+                ),
+            ),
+            order=swap(
+                quote_id=f"{intent_id}-quote",
+                from_token=asset_token,
+                to_token=BASE_USDC_ADDRESS,
+                from_amount=requested_amount,
+                from_decimals=18,
+                to_decimals=6,
+                notional_usdc=Decimal(notional_usdc),
+                slippage_bps=50,
+            ),
+            backend=Backend(
+                receipt(
+                    quote_id=f"{intent_id}-provider-quote",
+                    from_token=asset_token,
+                    to_token=BASE_USDC_ADDRESS,
+                    from_amount=requested_amount,
+                    to_amount=Decimal(to_amount),
+                    min_to_amount=Decimal(min_to_amount),
+                    slippage_bps=50,
+                    **approval,
+                )
+            ),
+            universe=universe,
+        )
+
     def test_confirmed_swap_records_reservation_and_receipt(self) -> None:
         result = self.execute()
         events = read_live_execution_events(path=self.audit)
@@ -542,10 +617,157 @@ class ControlledLiveExecutionTests(unittest.TestCase):
 
     def test_receipt_slippage_rejects_meaningful_excess_over_limit(self) -> None:
         result = self.execute(
-            backend=Backend(receipt(min_to_amount=Decimal("19.899998")))
+            backend=Backend(receipt(min_to_amount=Decimal("19.8999")))
         )
 
         self.assertEqual(result.status, STATUS_RECEIPT_REJECTED)
+
+    def test_non_usdc_receipt_rejects_50_001_bps_slippage(self) -> None:
+        universe = governed_universe()
+        result = self.execute(
+            trade=intent(
+                intent_id="non-usdc-meaningful-slippage",
+                strategy_id="research-ranked-base-portfolio",
+                side="BUY",
+                asset_symbol="AERO",
+                asset_token_address=AERO_ADDRESS,
+                current_position_usdc=Decimal("0"),
+                new_strategy=True,
+                source_refs=("research:aero", universe.snapshot_sha256),
+            ),
+            order=swap(
+                quote_id="non-usdc-meaningful-slippage-quote",
+                from_token=BASE_USDC_ADDRESS,
+                to_token=AERO_ADDRESS,
+                from_amount=Decimal("20"),
+                from_decimals=6,
+                to_decimals=18,
+            ),
+            backend=Backend(
+                receipt(
+                    quote_id="non-usdc-meaningful-slippage-provider-quote",
+                    from_token=BASE_USDC_ADDRESS,
+                    to_token=AERO_ADDRESS,
+                    from_amount=Decimal("20"),
+                    to_amount=Decimal("42"),
+                    min_to_amount=Decimal("41.7899958"),
+                    approval_transaction_hash="0x" + "b" * 64,
+                    approval_token=BASE_USDC_ADDRESS,
+                    approval_spender=PERMIT2_ADDRESS,
+                    approval_amount=Decimal("20"),
+                )
+            ),
+            universe=universe,
+        )
+
+        self.assertEqual(result.status, STATUS_RECEIPT_REJECTED)
+
+    def test_production_buy_receipt_sequence_153_is_confirmed(self) -> None:
+        asset_token = "0x63706e401c06ac8513145b7687a14804d17f814b"
+        universe = GovernedAssetUniverse(
+            observed_at=NOW - timedelta(minutes=5),
+            source="production-receipt-regression-2026-09-02",
+            snapshot_sha256="c" * 64,
+            assets=(
+                GovernedAsset(
+                    rank=1,
+                    symbol="PROD153",
+                    name="Production receipt asset PROD153",
+                    token_address=asset_token,
+                    decimals=18,
+                    market_cap_usd=Decimal("100000000"),
+                    liquidity_usd=Decimal("1000000"),
+                    daily_volume_usd=Decimal("1000000"),
+                    oldest_pool_created_at=NOW - timedelta(days=365),
+                ),
+            ),
+        )
+        result = self.execute(
+            trade=intent(
+                intent_id="production-buy-153",
+                strategy_id="production-receipt-regression",
+                side="BUY",
+                asset_symbol="PROD153",
+                asset_token_address=asset_token,
+                notional_usdc=Decimal("7.186726"),
+                current_position_usdc=Decimal("0"),
+                new_strategy=True,
+                source_refs=(
+                    "production-receipt:2026-09-02:153",
+                    universe.snapshot_sha256,
+                ),
+            ),
+            order=swap(
+                quote_id="production-buy-153-quote",
+                from_token=BASE_USDC_ADDRESS,
+                to_token=asset_token,
+                from_amount=Decimal("7.186726"),
+                from_decimals=6,
+                to_decimals=18,
+                notional_usdc=Decimal("7.186726"),
+                slippage_bps=50,
+            ),
+            backend=Backend(
+                receipt(
+                    quote_id="production-buy-153-provider-quote",
+                    from_token=BASE_USDC_ADDRESS,
+                    to_token=asset_token,
+                    from_amount=Decimal("7.186726"),
+                    to_amount=Decimal("0.055541334318500935"),
+                    min_to_amount=Decimal("0.0552636276469075"),
+                    slippage_bps=50,
+                    approval_transaction_hash="0x" + "d" * 64,
+                    approval_token=BASE_USDC_ADDRESS,
+                    approval_spender=PERMIT2_ADDRESS,
+                    approval_amount=Decimal("7.186726"),
+                )
+            ),
+            universe=universe,
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+
+    def test_production_sell_receipt_sequence_137_is_confirmed(self) -> None:
+        result = self.execute_production_sell_receipt(
+            intent_id="production-sell-137",
+            asset_symbol="PROD137",
+            asset_token="0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
+            notional_usdc="7.003110",
+            from_amount="0.002515683710638053",
+            to_amount="6.9958",
+            min_to_amount="6.9608",
+            approval_evidence=True,
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+
+    def test_production_sell_receipt_sequence_143_is_confirmed(self) -> None:
+        result = self.execute_production_sell_receipt(
+            intent_id="production-sell-143",
+            asset_symbol="PROD143",
+            asset_token="0xbaa5cc21fd487b8fcc2f632f3f4e8d37262a0842",
+            notional_usdc="6.992772",
+            from_amount="2.753059842519685039",
+            to_amount="6.97651",
+            min_to_amount="6.94161",
+            approval_evidence=False,
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
+
+    def test_production_sell_receipt_sequence_145_is_confirmed(self) -> None:
+        result = self.execute_production_sell_receipt(
+            intent_id="production-sell-145",
+            asset_symbol="PROD145",
+            asset_token="0xf43eb8de897fbc7f2502483b2bef7bb9ea179229",
+            notional_usdc="7.135799",
+            from_amount="1.295063339382940108",
+            to_amount="7.117864",
+            min_to_amount="7.082264",
+            approval_evidence=True,
+        )
+
+        self.assertEqual(result.status, STATUS_CONFIRMED)
 
 
 class CdpAgentKitBackendTests(unittest.TestCase):
@@ -822,7 +1044,9 @@ class CdpAgentKitBackendTests(unittest.TestCase):
             patch.dict("sys.modules", agentkit_modules(module)),
             patch("app.controlled_live_execution._prepare_cdp_swap_response_model"),
         ):
-            result = CdpAgentKitBackend().submit_swap(swap())
+            result = CdpAgentKitBackend().submit_swap(
+                swap(notional_usdc=Decimal("19"))
+            )
 
         self.assertTrue(result.success)
         self.assertEqual(result.quote_id, "executed-cdp-quote")
