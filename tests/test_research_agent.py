@@ -547,6 +547,15 @@ class ResearchAgentTests(unittest.TestCase):
                 "/research/crypto/base/latest?required_contracts=MAG7.SSI"
             )
 
+    def test_v3_bundle_route_remains_compatible(self) -> None:
+        with patch("app.research_agent.load_latest_packets", return_value=[]) as load:
+            status, response = public_route_response("/research/v3/bundle")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(response["schema_version"], 2)
+        self.assertEqual(response["packets"], [])
+        load.assert_called_once()
+
     def test_exact_contract_refresh_batches_without_provider_truncation(self) -> None:
         contracts = tuple(f"0x{number:040x}" for number in range(1, 32))
         with patch("app.research_agent.fetch_pairs", return_value=[]) as fetch:
