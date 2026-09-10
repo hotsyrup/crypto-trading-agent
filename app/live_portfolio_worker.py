@@ -1000,6 +1000,19 @@ def _readiness_code() -> str:
     }.get(cycle_status, "EXECUTION_LOCKED")
 
 
+def _record_cycle_started(
+    *, cycle_time: datetime, correlation_id: str
+) -> None:
+    """Expose cycle progress without invalidating the last completed readiness result."""
+    STATE.update(
+        status="operational",
+        operational_status="operational",
+        cycle_status="loading_balances",
+        last_cycle_started_at=cycle_time.isoformat(),
+        correlation_id=correlation_id,
+    )
+
+
 def _authorized_capital() -> Decimal:
     try:
         value = Decimal(os.getenv("LIVE_AUTHORIZED_CAPITAL_USDC", "500"))
@@ -1217,12 +1230,8 @@ def main() -> None:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
         cycle_delay = interval
-        STATE.update(
-            status="operational",
-            operational_status="operational",
-            trading_readiness="blocked",
-            cycle_status="loading_balances",
-            last_cycle_started_at=cycle_time.isoformat(),
+        _record_cycle_started(
+            cycle_time=cycle_time,
             correlation_id=correlation_id,
         )
         try:

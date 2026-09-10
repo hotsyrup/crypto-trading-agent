@@ -31,6 +31,7 @@ from app.live_portfolio_worker import (
     _record_cycle_failure,
     _record_cycle_result,
     _readiness_code,
+    _record_cycle_started,
     _cycle_sleep_seconds,
     _parallel_strategy_profiles,
     _research_receipt_time,
@@ -895,6 +896,22 @@ class LivePortfolioWorkerTests(unittest.TestCase):
         )
 
         self.assertEqual(_readiness_code(), "READY_LIVE")
+
+    def test_cycle_start_preserves_last_completed_readiness(self) -> None:
+        STATE.update(
+            operational_status="operational",
+            trading_readiness="ready",
+            cycle_status="no_eligible_signal",
+            last_cycle_at=NOW.isoformat(),
+        )
+
+        _record_cycle_started(cycle_time=NOW, correlation_id="cycle-next")
+
+        self.assertEqual(STATE["operational_status"], "operational")
+        self.assertEqual(STATE["trading_readiness"], "ready")
+        self.assertEqual(STATE["cycle_status"], "loading_balances")
+        self.assertEqual(STATE["last_cycle_started_at"], NOW.isoformat())
+        self.assertEqual(STATE["correlation_id"], "cycle-next")
 
     def test_integrity_failure_has_nonblank_safe_structured_diagnostic(self) -> None:
         output = StringIO()
