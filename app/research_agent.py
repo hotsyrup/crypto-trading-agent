@@ -22,7 +22,12 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from app.base_asset_universe import AssetUniverseError, load_governed_asset_universe
+from app.base_asset_universe import (
+    MAX_SNAPSHOT_AGE,
+    AssetUniverseError,
+    GovernedAssetUniverse,
+    load_governed_asset_universe,
+)
 from app.base_asset_universe_refresh import refresh_governed_asset_universe
 
 DEXSCREENER_ORIGIN = "https://api.dexscreener.com"
@@ -33,6 +38,8 @@ MAX_REQUIRED_CONTRACTS = 50
 REQUIRED_PACKET_MAX_AGE = timedelta(seconds=90)
 MAX_PROVIDER_ATTEMPTS = 3
 PROVIDER_COOLDOWN_SECONDS = 60
+UNIVERSE_REFRESH_LEAD_TIME = timedelta(hours=1)
+UNIVERSE_REFRESH_COOLDOWN_SECONDS = 300
 RESEARCH_SCHEMA_VERSION = 2
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
 LEGACY_RESEARCH_PATH = "/research/latest"
@@ -68,10 +75,16 @@ STATE: dict[str, object] = {
 }
 RESEARCH_PROVIDER_LOCK = threading.RLock()
 PROVIDER_COOLDOWN_UNTIL = 0.0
+UNIVERSE_REFRESH_LOCK = threading.Lock()
+UNIVERSE_REFRESH_COOLDOWN_UNTIL = 0.0
 
 
 class ProviderCooldownError(RuntimeError):
     """The shared provider is cooling down after exhausting rate-limit retries."""
+
+
+class UniverseRefreshCooldownError(RuntimeError):
+    """The governed-universe provider is cooling down after a failed refresh."""
 
 
 def _utc_now() -> datetime:
@@ -711,6 +724,70 @@ def ensure_required_contract_packets(
     return result
 
 
+def _load_configured_universe(
+    path: Path,
+    *,
+    refresh_enabled: bool,
+) -> GovernedAssetUniverse:
+    """Refresh once ahead of expiry and reuse valid state during provider outages."""
+
+    global UNIVERSE_REFRESH_COOLDOWN_UNTIL
+
+    current_time = _utc_now()
+    try:
+        current = load_governed_asset_universe(path, now=current_time)
+        load_error: AssetUniverseError | None = None
+    except AssetUniverseError as error:
+        current = None
+        load_error = error
+    refresh_due = (
+        current is None
+        or current_time - current.observed_at
+        >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+    )
+    if not refresh_due:
+        return current
+    if not refresh_enabled:
+        if current is not None:
+            return current
+        assert load_error is not None
+        raise load_error
+
+    with UNIVERSE_REFRESH_LOCK:
+        current_time = _utc_now()
+        try:
+            current = load_governed_asset_universe(path, now=current_time)
+            load_error = None
+        except AssetUniverseError as error:
+            current = None
+            load_error = error
+        refresh_due = (
+            current is None
+            or current_time - current.observed_at
+            >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+        )
+        if not refresh_due:
+            return current
+        if time.monotonic() < UNIVERSE_REFRESH_COOLDOWN_UNTIL:
+            if current is not None:
+                return current
+            raise UniverseRefreshCooldownError(
+                "Governed-universe provider cooldown is active."
+            ) from load_error
+        try:
+            refresh_governed_asset_universe(path)
+            refreshed = load_governed_asset_universe(path, now=_utc_now())
+        except Exception:
+            UNIVERSE_REFRESH_COOLDOWN_UNTIL = (
+                time.monotonic() + UNIVERSE_REFRESH_COOLDOWN_SECONDS
+            )
+            if current is not None:
+                return current
+            raise
+        UNIVERSE_REFRESH_COOLDOWN_UNTIL = 0.0
+        return refreshed
+
+
 def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     if os.getenv("RESEARCH_MODE", "observation_only").strip().lower() != "observation_only":
         raise ValueError("RESEARCH_MODE must remain observation_only.")
@@ -742,18 +819,15 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     universe_path = os.getenv("RESEARCH_ASSET_UNIVERSE_PATH", "").strip()
     if universe_path:
         path = Path(universe_path)
-        try:
-            universe = load_governed_asset_universe(path)
-        except AssetUniverseError:
-            if (
+        universe = _load_configured_universe(
+            path,
+            refresh_enabled=(
                 os.getenv("RESEARCH_REFRESH_ASSET_UNIVERSE", "false")
                 .strip()
                 .lower()
-                != "true"
-            ):
-                raise
-            refresh_governed_asset_universe(path)
-            universe = load_governed_asset_universe(path)
+                == "true"
+            ),
+        )
         governed_watchlist = tuple(
             WETH_CONTRACT if asset.token_address is None else asset.token_address
             for asset in universe.assets
@@ -897,7 +971,13 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             result = public_route_response(self.path)
-        except (HTTPError, ProviderCooldownError, URLError, TimeoutError):
+        except (
+            HTTPError,
+            ProviderCooldownError,
+            UniverseRefreshCooldownError,
+            URLError,
+            TimeoutError,
+        ):
             result = (
                 503,
                 {

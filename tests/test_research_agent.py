@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
+from app.base_asset_universe import AssetUniverseError
 from app.research_agent import (
     _build_contract_packets,
     build_packet,
@@ -149,6 +151,81 @@ class ResearchAgentTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "between 60 and 86400"):
                 load_config()
+
+    @patch("app.research_agent._utc_now")
+    @patch("app.research_agent.refresh_governed_asset_universe")
+    @patch("app.research_agent.load_governed_asset_universe")
+    def test_universe_refreshes_before_expiry_without_discarding_valid_state(
+        self,
+        load_universe,
+        refresh_universe,
+        utc_now,
+    ) -> None:
+        current_time = datetime(2026, 9, 10, 21, 0, tzinfo=timezone.utc)
+        utc_now.return_value = current_time
+        current = SimpleNamespace(
+            observed_at=current_time - timedelta(hours=23, minutes=30),
+            assets=(),
+        )
+        load_universe.return_value = current
+        refresh_universe.side_effect = HTTPError(
+            "https://api.geckoterminal.com/test",
+            429,
+            "busy",
+            {},
+            None,
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RESEARCH_ASSET_UNIVERSE_PATH": "/unused/universe.json",
+                    "RESEARCH_REFRESH_ASSET_UNIVERSE": "true",
+                },
+                clear=True,
+            ),
+            patch("app.research_agent.UNIVERSE_REFRESH_COOLDOWN_UNTIL", 0.0),
+        ):
+            *_, watchlist = load_config()
+
+        self.assertEqual(watchlist, ("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",))
+        refresh_universe.assert_called_once_with(Path("/unused/universe.json"))
+
+    @patch("app.research_agent.time.monotonic", return_value=100.0)
+    @patch("app.research_agent.refresh_governed_asset_universe")
+    @patch("app.research_agent.load_governed_asset_universe")
+    def test_expired_universe_refresh_failure_opens_shared_cooldown(
+        self,
+        load_universe,
+        refresh_universe,
+        monotonic,
+    ) -> None:
+        load_universe.side_effect = AssetUniverseError(
+            "Governed asset snapshot is stale."
+        )
+        refresh_universe.side_effect = HTTPError(
+            "https://api.geckoterminal.com/test",
+            429,
+            "busy",
+            {},
+            None,
+        )
+        environment = {
+            "RESEARCH_ASSET_UNIVERSE_PATH": "/unused/universe.json",
+            "RESEARCH_REFRESH_ASSET_UNIVERSE": "true",
+        }
+
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch("app.research_agent.UNIVERSE_REFRESH_COOLDOWN_UNTIL", 0.0),
+        ):
+            with self.assertRaises(HTTPError):
+                load_config()
+            with self.assertRaisesRegex(RuntimeError, "cooldown"):
+                load_config()
+
+        refresh_universe.assert_called_once_with(Path("/unused/universe.json"))
 
     @patch("app.research_agent.serve_health")
     @patch("app.research_agent.run_research_cycle", side_effect=KeyboardInterrupt)
