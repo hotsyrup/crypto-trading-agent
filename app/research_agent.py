@@ -32,6 +32,7 @@ MAX_API_CANDIDATES = 30
 MAX_REQUIRED_CONTRACTS = 50
 REQUIRED_PACKET_MAX_AGE = timedelta(seconds=90)
 MAX_PROVIDER_ATTEMPTS = 3
+PROVIDER_COOLDOWN_SECONDS = 60
 RESEARCH_SCHEMA_VERSION = 2
 BASE_RESEARCH_PATH = "/research/crypto/base/latest"
 LEGACY_RESEARCH_PATH = "/research/latest"
@@ -66,6 +67,11 @@ STATE: dict[str, object] = {
     "last_error": None,
 }
 RESEARCH_PROVIDER_LOCK = threading.RLock()
+PROVIDER_COOLDOWN_UNTIL = 0.0
+
+
+class ProviderCooldownError(RuntimeError):
+    """The shared provider is cooling down after exhausting rate-limit retries."""
 
 
 def _utc_now() -> datetime:
@@ -87,6 +93,10 @@ def _plain_decimal(value: Decimal | None) -> str | None:
 
 def get_json(path: str) -> object:
     """Fetch JSON only from the fixed DEX Screener HTTPS origin."""
+    global PROVIDER_COOLDOWN_UNTIL
+
+    if time.monotonic() < PROVIDER_COOLDOWN_UNTIL:
+        raise ProviderCooldownError("DEX Screener provider cooldown is active.")
     url = urljoin(f"{DEXSCREENER_ORIGIN}/", path.lstrip("/"))
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname != ALLOWED_API_HOST:
@@ -95,9 +105,15 @@ def get_json(path: str) -> object:
     for attempt in range(1, MAX_PROVIDER_ATTEMPTS + 1):
         try:
             with urlopen(request, timeout=10) as response:  # nosec B310
+                PROVIDER_COOLDOWN_UNTIL = 0.0
                 return json.load(response)
         except HTTPError as error:
             if error.code not in RETRYABLE_HTTP_STATUS or attempt == MAX_PROVIDER_ATTEMPTS:
+                if error.code == 429:
+                    PROVIDER_COOLDOWN_UNTIL = max(
+                        PROVIDER_COOLDOWN_UNTIL,
+                        time.monotonic() + PROVIDER_COOLDOWN_SECONDS,
+                    )
                 raise
             if error.code == 429:
                 retry_after = error.headers.get("Retry-After") if error.headers else None
@@ -881,7 +897,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             result = public_route_response(self.path)
-        except (HTTPError, URLError, TimeoutError):
+        except (HTTPError, ProviderCooldownError, URLError, TimeoutError):
             result = (
                 503,
                 {

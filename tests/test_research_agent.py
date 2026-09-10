@@ -86,6 +86,32 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(get_json("/test"), {"ok": True})
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [10, 20])
 
+    @patch("app.research_agent.time.monotonic", return_value=100.0)
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.urlopen")
+    def test_persistent_rate_limit_opens_shared_provider_cooldown(
+        self,
+        urlopen,
+        sleep,
+        monotonic,
+    ) -> None:
+        urlopen.side_effect = HTTPError(
+            "https://api.dexscreener.com/test",
+            429,
+            "busy",
+            {"Retry-After": "5"},
+            None,
+        )
+
+        with patch("app.research_agent.PROVIDER_COOLDOWN_UNTIL", 0.0):
+            with self.assertRaises(HTTPError):
+                get_json("/test")
+            with self.assertRaisesRegex(RuntimeError, "cooldown"):
+                get_json("/test")
+
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [5, 5])
+
     @patch("app.research_agent.time.sleep")
     @patch("app.research_agent.urlopen")
     def test_provider_permanent_client_error_does_not_retry(self, urlopen, sleep) -> None:
