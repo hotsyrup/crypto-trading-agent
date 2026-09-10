@@ -656,7 +656,9 @@ def ensure_required_contract_packets(
     """Refresh only missing/aged exact contracts, then prove complete coverage."""
 
     current_time = now or _utc_now()
-    _, _, minimum_liquidity, freshness, database_path, _ = load_config()
+    _, _, minimum_liquidity, freshness, database_path, _ = load_config(
+        proactive_universe_refresh=False
+    )
     existing = load_latest_packets_for_contracts(
         database_path,
         contracts,
@@ -728,6 +730,7 @@ def _load_configured_universe(
     path: Path,
     *,
     refresh_enabled: bool,
+    proactive_refresh: bool,
 ) -> GovernedAssetUniverse:
     """Refresh once ahead of expiry and reuse valid state during provider outages."""
 
@@ -742,8 +745,11 @@ def _load_configured_universe(
         load_error = error
     refresh_due = (
         current is None
-        or current_time - current.observed_at
-        >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+        or (
+            proactive_refresh
+            and current_time - current.observed_at
+            >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+        )
     )
     if not refresh_due:
         return current
@@ -763,8 +769,11 @@ def _load_configured_universe(
             load_error = error
         refresh_due = (
             current is None
-            or current_time - current.observed_at
-            >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+            or (
+                proactive_refresh
+                and current_time - current.observed_at
+                >= MAX_SNAPSHOT_AGE - UNIVERSE_REFRESH_LEAD_TIME
+            )
         )
         if not refresh_due:
             return current
@@ -788,7 +797,10 @@ def _load_configured_universe(
         return refreshed
 
 
-def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
+def load_config(
+    *,
+    proactive_universe_refresh: bool = True,
+) -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
     if os.getenv("RESEARCH_MODE", "observation_only").strip().lower() != "observation_only":
         raise ValueError("RESEARCH_MODE must remain observation_only.")
     forbidden_flags = ("LIVE_TRADING_ENABLED", "BANKR_ENABLED", "AIXBT_ENABLED")
@@ -827,6 +839,7 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
                 .lower()
                 == "true"
             ),
+            proactive_refresh=proactive_universe_refresh,
         )
         governed_watchlist = tuple(
             WETH_CONTRACT if asset.token_address is None else asset.token_address

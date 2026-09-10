@@ -192,6 +192,34 @@ class ResearchAgentTests(unittest.TestCase):
         self.assertEqual(watchlist, ("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",))
         refresh_universe.assert_called_once_with(Path("/unused/universe.json"))
 
+    @patch("app.research_agent._utc_now")
+    @patch("app.research_agent.refresh_governed_asset_universe")
+    @patch("app.research_agent.load_governed_asset_universe")
+    def test_request_path_does_not_wait_for_proactive_universe_refresh(
+        self,
+        load_universe,
+        refresh_universe,
+        utc_now,
+    ) -> None:
+        current_time = datetime(2026, 9, 10, 21, 0, tzinfo=timezone.utc)
+        utc_now.return_value = current_time
+        load_universe.return_value = SimpleNamespace(
+            observed_at=current_time - timedelta(hours=23, minutes=30),
+            assets=(),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "RESEARCH_ASSET_UNIVERSE_PATH": "/unused/universe.json",
+                "RESEARCH_REFRESH_ASSET_UNIVERSE": "true",
+            },
+            clear=True,
+        ):
+            load_config(proactive_universe_refresh=False)
+
+        refresh_universe.assert_not_called()
+
     @patch("app.research_agent.time.monotonic", return_value=100.0)
     @patch("app.research_agent.refresh_governed_asset_universe")
     @patch("app.research_agent.load_governed_asset_universe")
