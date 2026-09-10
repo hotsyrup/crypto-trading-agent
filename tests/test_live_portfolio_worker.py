@@ -156,6 +156,25 @@ class Runtime:
         )
 
 
+class DustEvidence:
+    def __init__(self, conservative_price_usd: Decimal) -> None:
+        self.conservative_price_usd = conservative_price_usd
+
+
+class DustPriceReader:
+    def __init__(self, prices: dict[str, Decimal]) -> None:
+        self.prices = prices
+        self.calls = []
+
+    def read_conservative_prices(self, contract_addresses, *, now):
+        self.calls.append((contract_addresses, now))
+        return {
+            contract: DustEvidence(self.prices[contract])
+            for contract in contract_addresses
+            if contract in self.prices
+        }
+
+
 class LivePortfolioWorkerTests(unittest.TestCase):
     def test_parallel_shadow_does_not_duplicate_active_medium_high_profile(self) -> None:
         self.assertEqual(
@@ -515,6 +534,74 @@ class LivePortfolioWorkerTests(unittest.TestCase):
             live_audit_path=self.audit,
             risk_journal_path=self.risk,
             now=NOW,
+        )
+
+        self.assertEqual(result.status, CYCLE_VALUATION_BLOCKED)
+        self.assertEqual(result.held_required, 1)
+        self.assertEqual(result.held_covered, 0)
+        self.assertFalse(self.risk.exists())
+        self.assertEqual(runtime.requests, [])
+
+    def test_missing_research_price_is_warning_only_when_exact_contract_proves_dust(self) -> None:
+        payload = research_payload()
+        payload["packets"] = []
+        runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("0.0000002"), 18),
+            )
+        )
+        reader = DustPriceReader({AERO_ADDRESS: Decimal("0.625")})
+
+        result = run_live_cycle(
+            runtime=runtime,
+            research_payload=payload,
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+            live_config=load_live_trading_config(),
+            executor_config=ExecutorConfig(
+                mode=EXECUTOR_MODE_SHADOW_ONLY,
+                kill_switch_state=KILL_SWITCH_HALTED,
+                max_data_age_seconds=120,
+                max_future_skew_seconds=30,
+            ),
+            dust_price_reader=reader,
+        )
+
+        self.assertEqual(result.status, CYCLE_NO_SIGNAL, result.reason)
+        self.assertEqual(result.trading_readiness, "blocked")
+        self.assertEqual(result.portfolio_value_usdc, Decimal("25"))
+        self.assertEqual(result.held_required, 0)
+        self.assertEqual(result.held_covered, 0)
+        self.assertEqual(result.quarantined_count, 1)
+        self.assertEqual(reader.calls, [((AERO_ADDRESS,), NOW)])
+        self.assertEqual(runtime.requests, [])
+
+    def test_exact_contract_fallback_at_materiality_boundary_stays_blocking(self) -> None:
+        payload = research_payload()
+        payload["packets"] = []
+        runtime = Runtime(
+            (
+                OnchainTokenBalance(BASE_USDC_ADDRESS, Decimal("25"), 6),
+                OnchainTokenBalance(AERO_ADDRESS, Decimal("8"), 18),
+            )
+        )
+        reader = DustPriceReader({AERO_ADDRESS: Decimal("0.625")})
+
+        result = run_live_cycle(
+            runtime=runtime,
+            research_payload=payload,
+            universe=universe(),
+            authorized_capital_usdc=Decimal("500"),
+            decision_journal_path=self.decisions,
+            live_audit_path=self.audit,
+            risk_journal_path=self.risk,
+            now=NOW,
+            dust_price_reader=reader,
         )
 
         self.assertEqual(result.status, CYCLE_VALUATION_BLOCKED)

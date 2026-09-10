@@ -40,6 +40,11 @@ from app.controlled_live_execution import (
 )
 from app.live_portfolio_risk import record_live_portfolio_value
 from app.live_execution_journal import read_live_execution_events
+from app.held_asset_materiality import (
+    DUST_THRESHOLD_USDC,
+    DexScreenerDustPriceReader,
+    ExactContractPriceReader,
+)
 from app.live_trading_config import (
     BASE_USDC_ADDRESS,
     LiveTradingConfig,
@@ -467,6 +472,7 @@ def run_live_cycle(
     strategy_profile: str = CAUTIOUS_PROFILE,
     strategy_journal_path: Path = STRATEGY_JOURNAL_PATH,
     parallel_shadow: bool = False,
+    dust_price_reader: ExactContractPriceReader | None = None,
 ) -> LiveCycleResult:
     """Verify live inputs and make at most one governed execution attempt."""
 
@@ -590,6 +596,47 @@ def run_live_cycle(
         for item in lifecycle_assessment.held_governed
         if (item.token_address or NATIVE_ETH_ADDRESS).lower() not in signal_contracts
     ]
+    dust_contracts: set[str] = set()
+    if missing_held and dust_price_reader is not None:
+        missing_contracts = tuple(
+            RESEARCH_WETH_ADDRESS
+            if item.token_address is None
+            or item.token_address.lower() == NATIVE_ETH_ADDRESS
+            else item.token_address.lower()
+            for item in missing_held
+        )
+        try:
+            fallback_prices = dust_price_reader.read_conservative_prices(
+                missing_contracts,
+                now=current_time,
+            )
+        except (HTTPError, URLError, TimeoutError, OSError, RuntimeError, ValueError):
+            fallback_prices = {}
+        balances_by_contract = {
+            item.token_address.lower(): item for item in balances
+        }
+        for item, research_contract in zip(missing_held, missing_contracts):
+            balance_contract = (item.token_address or NATIVE_ETH_ADDRESS).lower()
+            evidence = fallback_prices.get(research_contract)
+            balance = balances_by_contract.get(balance_contract)
+            if (
+                evidence is not None
+                and balance is not None
+                and balance.amount * evidence.conservative_price_usd
+                < DUST_THRESHOLD_USDC
+            ):
+                dust_contracts.add(balance_contract)
+    material_held = tuple(
+        item
+        for item in lifecycle_assessment.held_governed
+        if (item.token_address or NATIVE_ETH_ADDRESS).lower() not in dust_contracts
+    )
+    missing_held = [
+        item
+        for item in material_held
+        if (item.token_address or NATIVE_ETH_ADDRESS).lower() not in signal_contracts
+    ]
+    quarantined_count = len(lifecycle_assessment.quarantined) + len(dust_contracts)
     if missing_held:
         return LiveCycleResult(
             CYCLE_VALUATION_BLOCKED,
@@ -598,9 +645,9 @@ def run_live_cycle(
             Decimal("0"),
             "Fresh exact-contract valuation is missing for a governed holding.",
             trading_readiness="blocked",
-            held_required=len(lifecycle_assessment.held_governed),
-            held_covered=len(lifecycle_assessment.held_governed) - len(missing_held),
-            quarantined_count=len(lifecycle_assessment.quarantined),
+            held_required=len(material_held),
+            held_covered=len(material_held) - len(missing_held),
+            quarantined_count=quarantined_count,
         )
     portfolio = _verified_portfolio(
         balances,
@@ -609,7 +656,7 @@ def run_live_cycle(
         wallet_address=wallet,
         native_gas_reserve_eth=native_gas_reserve_eth,
         now=current_time,
-        lifecycle_assets=lifecycle_assessment.held_governed,
+        lifecycle_assets=material_held,
         cost_bases=cost_bases,
     )
     if portfolio.total_value_usdc == 0:
@@ -620,9 +667,9 @@ def run_live_cycle(
             Decimal("0"),
             "Exact CDP wallet and Base network verified with no governed funds.",
             trading_readiness="blocked",
-            held_required=len(lifecycle_assessment.held_governed),
-            held_covered=len(lifecycle_assessment.held_governed),
-            quarantined_count=len(lifecycle_assessment.quarantined),
+            held_required=len(material_held),
+            held_covered=len(material_held),
+            quarantined_count=quarantined_count,
         )
     risk = record_live_portfolio_value(
         portfolio.total_value_usdc,
@@ -836,9 +883,9 @@ def run_live_cycle(
                 and executor_config.kill_switch_state == KILL_SWITCH_ARMED
                 else "blocked"
             ),
-            held_required=len(lifecycle_assessment.held_governed),
-            held_covered=len(lifecycle_assessment.held_governed),
-            quarantined_count=len(lifecycle_assessment.quarantined),
+            held_required=len(material_held),
+            held_covered=len(material_held),
+            quarantined_count=quarantined_count,
         )
     selected = _ordered_signals(
         execution_signals,
@@ -881,9 +928,9 @@ def run_live_cycle(
         " ".join(result.reasons),
         result.transaction_hash,
         trading_readiness=("ready" if status not in {CYCLE_POLICY_BLOCKED} else "blocked"),
-        held_required=len(lifecycle_assessment.held_governed),
-        held_covered=len(lifecycle_assessment.held_governed),
-        quarantined_count=len(lifecycle_assessment.quarantined),
+        held_required=len(material_held),
+        held_covered=len(material_held),
+        quarantined_count=quarantined_count,
     )
 
 
@@ -1226,6 +1273,7 @@ def main() -> None:
     if not 30 <= interval <= 3600:
         raise ValueError("LIVE_WORKER_INTERVAL_SECONDS must be between 30 and 3600.")
     provider_reinit_failures = _provider_reinit_failures()
+    dust_price_reader = DexScreenerDustPriceReader()
     while True:
         cycle_time = datetime.now(timezone.utc)
         correlation_id = uuid.uuid4().hex[:16]
@@ -1275,6 +1323,7 @@ def main() -> None:
                     )
                 ),
                 parallel_shadow=parallel_shadow,
+                dust_price_reader=dust_price_reader,
             )
             _record_cycle_result(
                 result,
