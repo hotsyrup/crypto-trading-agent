@@ -268,6 +268,93 @@ class ResearchAgentTests(unittest.TestCase):
         serve_health.assert_called_once_with()
         run_cycle.assert_called_once_with()
 
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.serve_health")
+    @patch("app.research_agent._utc_now")
+    @patch("app.research_agent.run_research_cycle")
+    def test_transient_cycle_failure_keeps_fresh_cached_research_healthy(
+        self,
+        run_cycle,
+        utc_now,
+        serve_health,
+        sleep,
+    ) -> None:
+        now = datetime(2026, 9, 11, 20, 24, tzinfo=timezone.utc)
+        run_cycle.side_effect = [
+            HTTPError("https://api.dexscreener.com/test", 429, "busy", {}, None),
+            KeyboardInterrupt,
+        ]
+        utc_now.return_value = now
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RESEARCH_INTERVAL_SECONDS": "60",
+                    "RESEARCH_FRESHNESS_MINUTES": "5",
+                },
+                clear=True,
+            ),
+            patch.dict(
+                "app.research_agent.STATE",
+                {
+                    "mode": "observation_only",
+                    "status": "healthy",
+                    "last_cycle_at": (now - timedelta(minutes=1)).isoformat(),
+                    "packets_stored": 26,
+                    "last_error": None,
+                },
+                clear=True,
+            ) as state,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main()
+            self.assertEqual(state["status"], "healthy")
+            self.assertEqual(state["last_error"], "HTTPError:429")
+        sleep.assert_called_once_with(60)
+
+    @patch("app.research_agent.time.sleep")
+    @patch("app.research_agent.serve_health")
+    @patch("app.research_agent._utc_now")
+    @patch("app.research_agent.run_research_cycle")
+    def test_cycle_failure_fails_health_after_cached_research_expires(
+        self,
+        run_cycle,
+        utc_now,
+        serve_health,
+        sleep,
+    ) -> None:
+        now = datetime(2026, 9, 11, 20, 30, tzinfo=timezone.utc)
+        run_cycle.side_effect = [RuntimeError("provider unavailable"), KeyboardInterrupt]
+        utc_now.return_value = now
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RESEARCH_INTERVAL_SECONDS": "60",
+                    "RESEARCH_FRESHNESS_MINUTES": "5",
+                },
+                clear=True,
+            ),
+            patch.dict(
+                "app.research_agent.STATE",
+                {
+                    "mode": "observation_only",
+                    "status": "healthy",
+                    "last_cycle_at": (now - timedelta(minutes=6)).isoformat(),
+                    "packets_stored": 26,
+                    "last_error": None,
+                },
+                clear=True,
+            ) as state,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main()
+            self.assertEqual(state["status"], "failed")
+            self.assertEqual(state["last_error"], "RuntimeError")
+        sleep.assert_called_once_with(60)
+
     def test_governed_universe_becomes_exact_research_watchlist(self) -> None:
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:

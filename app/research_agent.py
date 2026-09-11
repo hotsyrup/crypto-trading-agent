@@ -927,6 +927,30 @@ def public_health_state() -> dict[str, object]:
     }
 
 
+def _fresh_cached_research_available(*, now: datetime) -> bool:
+    """Return whether the last successful packet set remains usable."""
+
+    last_cycle_at = STATE.get("last_cycle_at")
+    if not isinstance(last_cycle_at, str) or not last_cycle_at:
+        return False
+    try:
+        completed_at = datetime.fromisoformat(last_cycle_at)
+        freshness_minutes = int(os.getenv("RESEARCH_FRESHNESS_MINUTES", "90"))
+    except (TypeError, ValueError):
+        return False
+    if (
+        completed_at.tzinfo is None
+        or completed_at.utcoffset() is None
+        or not 5 <= freshness_minutes <= 1440
+    ):
+        return False
+    age = now.astimezone(timezone.utc) - completed_at.astimezone(timezone.utc)
+    return (
+        STATE.get("packets_stored", 0) != 0
+        and timedelta(0) <= age < timedelta(minutes=freshness_minutes)
+    )
+
+
 def public_route_response(path: str) -> tuple[int, dict[str, object]] | None:
     """Return one public read-only response without implying unbuilt capability."""
     if path in {"/", "/health"}:
@@ -1059,7 +1083,11 @@ def main() -> None:
             error_code = getattr(error, "code", None)
             error_name = type(error).__name__
             STATE.update(
-                status="failed",
+                status=(
+                    "healthy"
+                    if _fresh_cached_research_available(now=_utc_now())
+                    else "failed"
+                ),
                 last_error=(
                     f"{error_name}:{error_code}"
                     if error_code is not None
