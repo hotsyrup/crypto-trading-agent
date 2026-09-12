@@ -467,7 +467,11 @@ class ResearchAgentTests(unittest.TestCase):
                 "promotion_type": None,
             }
         ]
-        fetch_mock.return_value = [sample_pair()]
+        approved = sample_pair()
+        approved["quoteToken"]["address"] = (
+            "0x4200000000000000000000000000000000000006"
+        )
+        fetch_mock.return_value = [approved]
         store_mock.return_value = 1
 
         self.assertEqual(run_research_cycle(), 1)
@@ -830,7 +834,10 @@ class ResearchAgentTests(unittest.TestCase):
 
     def test_exact_contract_refresh_batches_without_provider_truncation(self) -> None:
         contracts = tuple(f"0x{number:040x}" for number in range(1, 32))
-        with patch("app.research_agent.fetch_pairs", return_value=[]) as fetch:
+        with (
+            patch("app.research_agent.fetch_pairs", return_value=[]) as fetch,
+            patch("app.research_agent.fetch_token_pairs", return_value=[]) as fallback,
+        ):
             packets = _build_contract_packets(
                 contracts,
                 minimum_liquidity=Decimal("50000"),
@@ -842,6 +849,36 @@ class ResearchAgentTests(unittest.TestCase):
             tuple(packet["contract_address"] for packet in packets),
             contracts,
         )
+        self.assertEqual(fallback.call_count, 31)
+
+    def test_exact_contract_refresh_falls_back_when_batch_pair_quote_is_unapproved(
+        self,
+    ) -> None:
+        unapproved = sample_pair()
+        unapproved["quoteToken"]["address"] = (
+            "0x940181a94a35a4569e4529a3cdfb74e38fd98631"
+        )
+        approved = sample_pair()
+        approved["quoteToken"]["address"] = (
+            "0x4200000000000000000000000000000000000006"
+        )
+
+        with (
+            patch("app.research_agent.fetch_pairs", return_value=[unapproved]),
+            patch("app.research_agent.get_json", return_value=[approved]) as get_json,
+        ):
+            packet = _build_contract_packets(
+                (ADDRESS,),
+                minimum_liquidity=Decimal("50000"),
+                freshness=5,
+            )[0]
+
+        self.assertEqual(packet["data_quality"], "complete")
+        self.assertEqual(
+            packet["source"]["quote_contract_address"],
+            "0x4200000000000000000000000000000000000006",
+        )
+        get_json.assert_called_once_with(f"/token-pairs/v1/base/{ADDRESS}")
 
     def test_on_demand_refresh_reuses_evidenced_pair_age_when_provider_omits_it(self) -> None:
         pair = sample_pair()

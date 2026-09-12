@@ -204,6 +204,17 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
     return [pair for pair in payload if isinstance(pair, dict)]
 
 
+def fetch_token_pairs(contract_address: str) -> list[dict[str, object]]:
+    """Fetch every advertised Base pair for one exact token contract."""
+
+    if not ADDRESS_PATTERN.fullmatch(contract_address):
+        raise ValueError("Base token address must be a full hex contract address.")
+    payload = get_json(f"/token-pairs/v1/base/{contract_address}")
+    if not isinstance(payload, list):
+        raise ValueError("DEX Screener token-pairs response must be a list.")
+    return [pair for pair in payload if isinstance(pair, dict)]
+
+
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
     liquidity = pair.get("liquidity")
     value = liquidity.get("usd") if isinstance(liquidity, dict) else None
@@ -274,6 +285,32 @@ def eligible_base_pairs(
         ):
             eligible.append(pair)
     return eligible
+
+
+def fetch_pairs_with_approved_quote_fallback(
+    addresses: tuple[str, ...],
+    *,
+    pair_age_by_contract: dict[str, datetime] | None = None,
+) -> list[dict[str, object]]:
+    """Fill batch gaps without broadening the approved quote-token policy."""
+
+    pairs = fetch_pairs(list(addresses))
+    for contract_address in addresses:
+        approved_quotes = APPROVED_QUOTE_CONTRACTS.get(
+            contract_address,
+            DISCOVERY_QUOTE_CONTRACTS,
+        )
+        if eligible_base_pairs(
+            contract_address,
+            pairs,
+            approved_quotes,
+            pair_created_at_fallback=(pair_age_by_contract or {}).get(
+                contract_address
+            ),
+        ):
+            continue
+        pairs.extend(fetch_token_pairs(contract_address))
+    return pairs
 
 
 def select_primary_pair(
@@ -610,8 +647,12 @@ def _build_contract_packets(
     pairs: list[dict[str, object]] = []
     with RESEARCH_PROVIDER_LOCK:
         for offset in range(0, len(contracts), MAX_API_CANDIDATES):
+            chunk = contracts[offset : offset + MAX_API_CANDIDATES]
             pairs.extend(
-                fetch_pairs(list(contracts[offset : offset + MAX_API_CANDIDATES]))
+                fetch_pairs_with_approved_quote_fallback(
+                    chunk,
+                    pair_age_by_contract=pair_age_by_contract,
+                )
             )
     received_at = _utc_now()
     packets = []
@@ -876,7 +917,23 @@ def run_research_cycle() -> int:
             )
     addresses = [str(profile["contract_address"]) for profile in profiles]
     with RESEARCH_PROVIDER_LOCK:
-        pairs = fetch_pairs(addresses)
+        pairs = fetch_pairs_with_approved_quote_fallback(
+            tuple(addresses),
+            pair_age_by_contract=(
+                {
+                    str(profile["contract_address"]): profile[
+                        "pair_created_at_fallback"
+                    ]
+                    for profile in profiles
+                    if isinstance(
+                        profile.get("pair_created_at_fallback"),
+                        datetime,
+                    )
+                }
+                if universe_path
+                else None
+            ),
+        )
     received_at = _utc_now()
     if received_at < cycle_started_at:
         raise ValueError("Research provider cycle completion precedes its start.")
