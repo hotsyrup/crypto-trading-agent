@@ -16,6 +16,15 @@ class LiveDependencyContractTests(unittest.TestCase):
             dockerfile,
         )
 
+    def test_research_image_serves_the_trader_compatibility_contract(self) -> None:
+        dockerfile = (ROOT / "Dockerfile.research").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'CMD ["python", "-m", "app.research_agent"]',
+            dockerfile,
+        )
+        self.assertNotIn("app.research_v3_app", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()
