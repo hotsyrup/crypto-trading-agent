@@ -157,10 +157,13 @@ def fetch_pairs(addresses: list[str]) -> list[dict[str, object]]:
         raise ValueError("DEX Screener accepts at most 30 token addresses per batch.")
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in addresses):
         raise ValueError("Every Base token address must be a full hex contract address.")
-    payload = get_json(f"/tokens/v1/base/{','.join(addresses)}")
-    if not isinstance(payload, list):
-        raise ValueError("DEX Screener tokens response must be a list.")
-    return [pair for pair in payload if isinstance(pair, dict)]
+    pairs: list[dict[str, object]] = []
+    for address in addresses:
+        payload = get_json(f"/tokens/v1/base/{address}")
+        if not isinstance(payload, list):
+            raise ValueError("DEX Screener tokens response must be a list.")
+        pairs.extend(pair for pair in payload if isinstance(pair, dict))
+    return pairs
 
 
 def _pair_liquidity(pair: dict[str, object]) -> Decimal:
@@ -169,24 +172,30 @@ def _pair_liquidity(pair: dict[str, object]) -> Decimal:
     return _decimal(value) or Decimal("0")
 
 
-def _pair_has_complete_core_metrics(pair: dict[str, object]) -> bool:
+def _pair_has_complete_core_metrics(
+    pair: dict[str, object],
+    contract_address: str,
+    *,
+    pair_created_at_fallback: datetime | None = None,
+) -> bool:
     volume = pair.get("volume") if isinstance(pair.get("volume"), dict) else {}
     changes = pair.get("priceChange") if isinstance(pair.get("priceChange"), dict) else {}
     transactions = pair.get("txns") if isinstance(pair.get("txns"), dict) else {}
     h24_transactions = (
         transactions.get("h24") if isinstance(transactions.get("h24"), dict) else {}
     )
-    required = (
+    required = [
         pair.get("priceUsd"),
         _pair_liquidity(pair),
         volume.get("h24"),
         volume.get("h6"),
-        changes.get("h24"),
-        changes.get("h6"),
         h24_transactions.get("buys"),
         h24_transactions.get("sells"),
-        pair.get("pairCreatedAt"),
-    )
+    ]
+    if pair.get("pairCreatedAt") is None and pair_created_at_fallback is None:
+        required.append(None)
+    if contract_address.lower() != USDC_CONTRACT:
+        required.extend((changes.get("h24"), changes.get("h6")))
     return all(value is not None for value in required)
 
 
@@ -194,6 +203,8 @@ def eligible_base_pairs(
     contract_address: str,
     pairs: list[dict[str, object]],
     approved_quote_addresses: set[str] | None = None,
+    *,
+    pair_created_at_fallback: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Return Base pools where the researched contract is the base token."""
     eligible = []
@@ -217,7 +228,11 @@ def eligible_base_pairs(
                 approved_quote_addresses is None
                 or quote_address.lower() in approved_quote_addresses
             )
-            and _pair_has_complete_core_metrics(pair)
+            and _pair_has_complete_core_metrics(
+                pair,
+                contract_address,
+                pair_created_at_fallback=pair_created_at_fallback,
+            )
         ):
             eligible.append(pair)
     return eligible
@@ -253,6 +268,7 @@ def build_packet(
     dex_id = None
     base_contract_address = None
     quote_contract_address = None
+    pair_created_at_provider = None
 
     if pair is None:
         warnings.append("NO_BASE_DENOMINATED_PAIR_FOUND")
@@ -277,8 +293,14 @@ def build_packet(
         created_at = None
         if isinstance(created_ms, (int, float)):
             created_at = datetime.fromtimestamp(created_ms / 1000, timezone.utc)
-            if received_at - created_at < timedelta(days=7):
-                warnings.append("PAIR_YOUNGER_THAN_7_DAYS")
+            pair_created_at_provider = "dexscreener"
+        elif isinstance(profile.get("pair_created_at_fallback"), datetime):
+            fallback = profile["pair_created_at_fallback"]
+            if fallback.tzinfo is not None and fallback.utcoffset() is not None:
+                created_at = fallback.astimezone(timezone.utc)
+                pair_created_at_provider = "geckoterminal_governed_universe"
+        if created_at is not None and received_at - created_at < timedelta(days=7):
+            warnings.append("PAIR_YOUNGER_THAN_7_DAYS")
         if liquidity < minimum_liquidity_usd:
             warnings.append("LIQUIDITY_BELOW_RESEARCH_THRESHOLD")
         metrics = {
@@ -330,6 +352,7 @@ def build_packet(
             "eligible_pair_count": eligible_pair_count,
             "base_contract_address": base_contract_address,
             "quote_contract_address": quote_contract_address,
+            "pair_created_at_provider": pair_created_at_provider,
         },
         "metrics": metrics,
         "warnings": sorted(set(warnings)),
@@ -382,7 +405,7 @@ def store_packets(database_path: Path, packets: list[dict[str, object]]) -> int:
 
 def load_latest_packets(
     database_path: Path,
-    limit: int = 25,
+    limit: int = MAX_API_CANDIDATES,
     now: datetime | None = None,
 ) -> list[dict[str, object]]:
     """Read recent public packets without creating or modifying the database."""
@@ -453,21 +476,39 @@ def load_config() -> tuple[int, int, Decimal, int, Path, tuple[str, ...]]:
                 raise
             refresh_governed_asset_universe(path)
             universe = load_governed_asset_universe(path)
-        watchlist = tuple(
+        governed_watchlist = tuple(
             WETH_CONTRACT if asset.token_address is None else asset.token_address
             for asset in universe.assets
         )
+        if len(governed_watchlist) > limit:
+            raise ValueError(
+                "Governed research universe cannot exceed RESEARCH_MAX_CANDIDATES."
+            )
+        watchlist = tuple(dict.fromkeys((*governed_watchlist, USDC_CONTRACT)))
     if any(not ADDRESS_PATTERN.fullmatch(address) for address in watchlist):
         raise ValueError("RESEARCH_WATCHLIST contains an invalid contract address.")
-    if len(watchlist) > limit:
+    if not universe_path and len(watchlist) > limit:
         raise ValueError("RESEARCH_WATCHLIST cannot exceed RESEARCH_MAX_CANDIDATES.")
+    if len(watchlist) > MAX_API_CANDIDATES:
+        raise ValueError("Research watchlist cannot exceed the provider batch limit.")
     return interval, limit, minimum_liquidity, freshness, database_path, watchlist
 
 
 def run_research_cycle() -> int:
     _, limit, minimum_liquidity, freshness, database_path, watchlist = load_config()
     cycle_started_at = _utc_now()
-    profiles = discover_base_contracts(limit, watchlist)
+    profiles = discover_base_contracts(len(watchlist), watchlist)
+    universe_path = os.getenv("RESEARCH_ASSET_UNIVERSE_PATH", "").strip()
+    if universe_path:
+        governed = load_governed_asset_universe(Path(universe_path))
+        pair_age_by_contract = {
+            (asset.token_address or WETH_CONTRACT): asset.oldest_pool_created_at
+            for asset in governed.assets
+        }
+        for profile in profiles:
+            profile["pair_created_at_fallback"] = pair_age_by_contract.get(
+                str(profile["contract_address"])
+            )
     addresses = [str(profile["contract_address"]) for profile in profiles]
     pairs = fetch_pairs(addresses)
     received_at = _utc_now()
@@ -480,7 +521,12 @@ def run_research_cycle() -> int:
             contract_address,
             DISCOVERY_QUOTE_CONTRACTS,
         )
-        eligible = eligible_base_pairs(contract_address, pairs, approved_quotes)
+        eligible = eligible_base_pairs(
+            contract_address,
+            pairs,
+            approved_quotes,
+            pair_created_at_fallback=profile.get("pair_created_at_fallback"),
+        )
         packets.append(
             build_packet(
                 profile,

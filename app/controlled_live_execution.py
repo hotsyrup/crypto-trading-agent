@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.base_asset_universe import GovernedAssetUniverse
 from app.live_execution_journal import (
@@ -41,6 +41,10 @@ CDP_SWAP_NETWORK = "base"
 NATIVE_ETH_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 PERMIT2_ADDRESS = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 MAX_SLIPPAGE_BPS = 100
+# CDP independently rounds its quoted output and minimum-output amounts. Bound
+# that provider precision allowance in basis points so it scales across assets
+# and notionals, while the absolute 100-bps ceiling remains unchanged.
+RECEIPT_SLIPPAGE_PRECISION_BPS = Decimal("0.1")
 TRANSACTION_HASH_PATTERN = re.compile(r"0x[0-9a-fA-F]{64}")
 
 STATUS_CONFIRMED = "CONFIRMED"
@@ -258,13 +262,18 @@ def _validate_receipt(
         )
     ):
         reasons.append("CDP receipt output amounts are invalid.")
-    elif (
-        (receipt.to_amount - receipt.min_to_amount)
-        * Decimal("10000")
-        / receipt.to_amount
-        > request.slippage_bps
-    ):
-        reasons.append("CDP receipt minimum output exceeds approved slippage.")
+    else:
+        effective_slippage_bps = min(
+            Decimal(request.slippage_bps) + RECEIPT_SLIPPAGE_PRECISION_BPS,
+            Decimal(MAX_SLIPPAGE_BPS),
+        )
+        approved_minimum_output = (
+            receipt.to_amount
+            * (Decimal("10000") - effective_slippage_bps)
+            / Decimal("10000")
+        )
+        if receipt.min_to_amount < approved_minimum_output:
+            reasons.append("CDP receipt minimum output exceeds approved slippage.")
     approval_values = (
         receipt.approval_transaction_hash,
         receipt.approval_token,
@@ -278,19 +287,19 @@ def _validate_receipt(
         if not all(value is not None for value in approval_values):
             reasons.append("ERC-20 approval evidence is incomplete.")
         else:
-            assert receipt.approval_transaction_hash is not None
-            assert receipt.approval_token is not None
-            assert receipt.approval_spender is not None
-            assert receipt.approval_amount is not None
+            approval_transaction_hash = cast(str, receipt.approval_transaction_hash)
+            approval_token = cast(str, receipt.approval_token)
+            approval_spender = cast(str, receipt.approval_spender)
+            approval_amount = cast(Decimal, receipt.approval_amount)
             if not TRANSACTION_HASH_PATTERN.fullmatch(
-                receipt.approval_transaction_hash
+                approval_transaction_hash
             ):
                 reasons.append("ERC-20 approval transaction hash is invalid.")
-            if receipt.approval_token.strip().lower() != request.from_token.strip().lower():
+            if approval_token.strip().lower() != request.from_token.strip().lower():
                 reasons.append("ERC-20 approval token does not match the swap input.")
-            if receipt.approval_spender.strip().lower() != PERMIT2_ADDRESS:
+            if approval_spender.strip().lower() != PERMIT2_ADDRESS:
                 reasons.append("ERC-20 approval spender is not Permit2.")
-            if receipt.approval_amount != request.from_amount:
+            if approval_amount != request.from_amount:
                 reasons.append("ERC-20 approval must equal the exact swap amount.")
     return tuple(reasons)
 

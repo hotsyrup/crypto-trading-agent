@@ -178,7 +178,14 @@ def _canonical_value(value: object) -> object:
 
 
 def intent_fingerprint(intent: TradeIntent) -> str:
-    payload = _canonical_value(asdict(intent))
+    payload = asdict(intent)
+    # Portfolio marks are evaluation context and can change while the selected
+    # research packet and proposed order remain identical. Keep them subject to
+    # policy checks, but exclude them from the replay identity so a still-fresh
+    # packet becomes a duplicate instead of an audit mismatch.
+    payload.pop("current_position_usdc")
+    payload.pop("treasury_value_usdc")
+    payload = _canonical_value(payload)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

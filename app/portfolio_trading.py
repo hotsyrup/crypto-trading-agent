@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 
@@ -17,6 +17,8 @@ from app.base_asset_universe import (
 from app.controlled_live_execution import (
     NATIVE_ETH_ADDRESS,
     ROUTE_ID,
+    STATUS_AUDIT_FAILURE,
+    STATUS_DUPLICATE_BLOCKED,
     STATUS_POLICY_REJECTED,
     ApprovedSwap,
     ControlledLiveResult,
@@ -38,9 +40,17 @@ MAX_RESEARCH_AGE_SECONDS = 120
 MAX_FUTURE_SKEW_SECONDS = 30
 STOP_LOSS_PERCENT = Decimal("8")
 TAKE_PROFIT_PERCENT = Decimal("15")
+MIN_BUY_NOTIONAL_USDC = Decimal("5")
+ENTRY_COOLDOWN = timedelta(hours=6)
+MAX_CONFIRMED_BUYS_PER_POSITION = 2
+MIN_ENTRY_H6_PERCENT = Decimal("0.5")
+MIN_ENTRY_H24_PERCENT = Decimal("1")
+MIN_ENTRY_BUY_SELL_RATIO = Decimal("1.05")
+FAST_EXIT_H6_PERCENT = Decimal("-1.5")
+MIN_EXIT_LIQUIDITY_USD = Decimal("25000")
 DEFAULT_SLIPPAGE_BPS = 50
 STRATEGY_ID = "research-ranked-base-portfolio"
-STRATEGY_VERSION = "1.0.0"
+STRATEGY_VERSION = "1.1.0"
 WETH_ADDRESS = "0x4200000000000000000000000000000000000006"
 USDC_QUANTUM = Decimal("0.000001")
 ALLOWED_RESEARCH_WARNINGS = {
@@ -71,6 +81,9 @@ class PortfolioPosition:
     token_balance: Decimal
     value_usdc: Decimal
     average_entry_price_usdc: Decimal
+    cost_basis_verified: bool = False
+    last_entry_at: datetime | None = None
+    confirmed_buy_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -238,6 +251,47 @@ def _position_for(
     return matches[0] if matches else None
 
 
+def is_entry_signal(signal: ResearchSignal) -> bool:
+    buy_sell_ratio = (
+        Decimal(signal.buys_h24) / Decimal(signal.sells_h24)
+        if signal.sells_h24 > 0
+        else Decimal(signal.buys_h24)
+    )
+    return bool(
+        signal.change_h6_percent >= MIN_ENTRY_H6_PERCENT
+        and signal.change_h24_percent >= MIN_ENTRY_H24_PERCENT
+        and buy_sell_ratio >= MIN_ENTRY_BUY_SELL_RATIO
+    )
+
+
+def is_exit_signal(
+    signal: ResearchSignal,
+    position: PortfolioPosition | None,
+) -> bool:
+    if position is None:
+        return False
+    stop_or_take_profit = bool(
+        position.cost_basis_verified
+        and _finite_positive(position.average_entry_price_usdc)
+        and (
+            signal.price_usd
+            <= position.average_entry_price_usdc
+            * (Decimal("1") - STOP_LOSS_PERCENT / Decimal("100"))
+            or signal.price_usd
+            >= position.average_entry_price_usdc
+            * (Decimal("1") + TAKE_PROFIT_PERCENT / Decimal("100"))
+        )
+    )
+    dual_reversal = (
+        signal.change_h6_percent < 0 and signal.change_h24_percent < 0
+    )
+    fast_breakdown = (
+        signal.change_h6_percent <= FAST_EXIT_H6_PERCENT
+        and signal.sells_h24 > signal.buys_h24
+    )
+    return bool(stop_or_take_profit or dual_reversal or fast_breakdown)
+
+
 def execute_research_portfolio_signal(
     signal: ResearchSignal,
     portfolio: VerifiedPortfolio,
@@ -270,6 +324,11 @@ def execute_research_portfolio_signal(
         return _policy_rejected("Governed asset universe is stale.")
     if universe_age < -MAX_FUTURE_SKEW:
         return _policy_rejected("Governed asset universe is from the future.")
+    research_age_limit = (
+        executor_config.max_data_age_seconds
+        if executor_config is not None
+        else MAX_RESEARCH_AGE_SECONDS
+    )
     for label, timestamp in (
         ("Research", signal.observed_at),
         ("Portfolio", portfolio.observed_at),
@@ -277,7 +336,7 @@ def execute_research_portfolio_signal(
         if not _aware(timestamp):
             return _policy_rejected(f"{label} timestamp must include a timezone.")
         age = (current_time - timestamp.astimezone(timezone.utc)).total_seconds()
-        if age > MAX_RESEARCH_AGE_SECONDS:
+        if age > research_age_limit:
             return _policy_rejected(f"{label} data is stale.")
         if age < -MAX_FUTURE_SKEW_SECONDS:
             return _policy_rejected(f"{label} timestamp is too far in the future.")
@@ -319,11 +378,17 @@ def execute_research_portfolio_signal(
     )
     if any(not value.is_finite() for value in decimals) or signal.price_usd <= 0:
         return _policy_rejected("Research signal contains invalid numeric values.")
-    if (
+    entry_liquidity_failure = (
         signal.liquidity_usd < MINIMUM_LIQUIDITY_USD
         or signal.daily_volume_usd < MINIMUM_DAILY_VOLUME_USD
         or signal.liquidity_usd < asset.liquidity_usd / Decimal("2")
-    ):
+    )
+    if position is not None:
+        if signal.liquidity_usd < MIN_EXIT_LIQUIDITY_USD:
+            return _policy_rejected(
+                "Held-position exit liquidity is below the economic safety floor."
+            )
+    elif entry_liquidity_failure:
         return _policy_rejected("Research liquidity or volume is below policy.")
     if (
         type(signal.buys_h24) is not int
@@ -334,36 +399,12 @@ def execute_research_portfolio_signal(
         return _policy_rejected("Research transaction counts are invalid.")
 
     current_position = position.value_usdc if position is not None else Decimal("0")
-    buy_signal = (
-        signal.change_h6_percent > 0
-        and signal.change_h24_percent > 0
-        and signal.buys_h24 > signal.sells_h24
-    )
-    stop_or_take_profit = bool(
-        position is not None
-        and _finite_positive(position.average_entry_price_usdc)
-        and (
-            signal.price_usd
-            <= position.average_entry_price_usdc
-            * (Decimal("1") - STOP_LOSS_PERCENT / Decimal("100"))
-            or signal.price_usd
-            >= position.average_entry_price_usdc
-            * (Decimal("1") + TAKE_PROFIT_PERCENT / Decimal("100"))
-        )
-    )
-    sell_signal = bool(
-        position is not None
-        and (
-            (
-                signal.change_h6_percent < 0
-                and signal.change_h24_percent < 0
-            )
-            or stop_or_take_profit
-        )
-    )
+    buy_signal = is_entry_signal(signal)
+    sell_signal = is_exit_signal(signal, position)
 
     if sell_signal:
-        assert position is not None
+        if position is None:
+            return _policy_rejected("Verified sell position is unavailable.")
         if (
             not _finite_positive(position.value_usdc)
             or not _finite_positive(position.token_balance)
@@ -382,6 +423,23 @@ def execute_research_portfolio_signal(
         )
         new_strategy = False
     elif buy_signal:
+        if (
+            position is not None
+            and position.last_entry_at is not None
+            and current_time - position.last_entry_at < ENTRY_COOLDOWN
+        ):
+            return _policy_rejected("Position entry cooldown is active.")
+        if (
+            position is not None
+            and position.confirmed_buy_count >= MAX_CONFIRMED_BUYS_PER_POSITION
+        ):
+            return _policy_rejected("Position has reached its confirmed buy limit.")
+        if (
+            position is not None
+            and position.cost_basis_verified
+            and signal.price_usd <= position.average_entry_price_usdc
+        ):
+            return _policy_rejected("Strategy will not add to a losing position.")
         position_limit = portfolio.total_value_usdc * Decimal("0.20")
         room = position_limit - current_position
         new_strategy = position is None
@@ -398,6 +456,8 @@ def execute_research_portfolio_signal(
         ).quantize(USDC_QUANTUM, rounding=ROUND_DOWN)
         if not _finite_positive(notional):
             return _policy_rejected("No portfolio capacity remains for this buy.")
+        if notional < MIN_BUY_NOTIONAL_USDC:
+            return _policy_rejected("Buy notional is below the $5 economic minimum.")
         side = "BUY"
         from_amount = notional
     else:
@@ -425,11 +485,14 @@ def execute_research_portfolio_signal(
         recipient_address=portfolio.treasury_address,
         chain_id=BASE_MAINNET_CHAIN_ID,
         market_data_observed_at=signal.observed_at,
-        created_at=current_time,
+        # Anchor the intent to the research evidence. A worker can evaluate the
+        # same still-fresh packet on several cycles; using wall-clock cycle time
+        # here changed the fingerprint while retaining the packet-derived intent
+        # ID, turning a safe replay into an audit failure.
+        created_at=signal.observed_at,
         source_refs=(
             f"research:{signal.packet_id}",
             universe.snapshot_sha256,
-            f"portfolio:{portfolio.observed_at.isoformat()}",
         ),
     )
     asset_token = asset.token_address or NATIVE_ETH_ADDRESS
@@ -447,6 +510,26 @@ def execute_research_portfolio_signal(
         notional_usdc=notional,
         slippage_bps=DEFAULT_SLIPPAGE_BPS,
     )
+    # The packet-derived intent ID is the replay boundary. Portfolio values can
+    # legitimately change after a successful sell, which also changes the full
+    # decision fingerprint. Block that already-consumed packet before the
+    # generic journal's stricter same-ID/different-content integrity check.
+    try:
+        from app.execution_journal import JournalIntegrityError, read_execution_decisions
+
+        if any(
+            entry.get("intent_id") == intent_id
+            for entry in read_execution_decisions(path=decision_journal_path)
+        ):
+            return ControlledLiveResult(
+                status=STATUS_DUPLICATE_BLOCKED,
+                reasons=("Research packet intent was already recorded; replay blocked.",),
+            )
+    except (JournalIntegrityError, OSError, ValueError) as error:
+        return ControlledLiveResult(
+            status=STATUS_AUDIT_FAILURE,
+            reasons=(f"Execution decision journal unavailable: {error}",),
+        )
     return execute_controlled_live_trade(
         intent,
         risk,

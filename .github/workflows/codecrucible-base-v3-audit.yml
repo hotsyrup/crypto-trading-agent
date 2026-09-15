@@ -1,0 +1,118 @@
+name: CodeCrucible Base V3 audit
+
+on:
+  push:
+    branches:
+      - codex/codecrucible-base-v3-audit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Read-only Research V3 and Trader V3 audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CODECRUCIBLE_COMMIT: 531ce60e601bca6ce3118f30abeae83888c69b67
+      OPENAI_API_KEY: ${{ secrets.CODECRUCIBLE_OPENAI_API_KEY }}
+
+    steps:
+      - name: Check out isolated audit snapshot
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.1"
+          cache: false
+
+      - name: Build pinned Block CodeCrucible
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/block/codecrucible.git "$RUNNER_TEMP/codecrucible"
+          git -C "$RUNNER_TEMP/codecrucible" checkout --detach "$CODECRUCIBLE_COMMIT"
+          make -C "$RUNNER_TEMP/codecrucible" build
+
+      - name: Prepare bounded Base V3 source snapshot
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/base-v3/app" artifacts/phases
+          files=(
+            research_v3_app.py
+            research_v3_service.py
+            research_v3_runtime.py
+            research_v3_replay.py
+            openai_research_v3.py
+            research_contract_v3.py
+            research_state.py
+            research_transport.py
+            research_feed.py
+            research_agent.py
+            live_portfolio_worker.py
+            live_portfolio_risk.py
+            portfolio_trading.py
+            trading_executor.py
+            controlled_live_execution.py
+            live_execution_journal.py
+            execution_journal.py
+            live_trading_config.py
+            live_asset_policy.py
+            base_asset_universe.py
+            base_asset_universe_refresh.py
+            held_asset_materiality.py
+            position_cost_basis.py
+            service_receipts.py
+            safety_gate.py
+            wallet_config.py
+          )
+          for file in "${files[@]}"; do
+            cp "app/$file" "$RUNNER_TEMP/base-v3/app/$file"
+          done
+          find "$RUNNER_TEMP/base-v3/app" -type f -name '*.py' -print | sort > artifacts/scope.txt
+
+      - name: Verify dedicated API key is available
+        shell: bash
+        run: |
+          if [[ -z "$OPENAI_API_KEY" ]]; then
+            echo "CODECRUCIBLE_OPENAI_API_KEY is unavailable to this workflow." >&2
+            exit 1
+          fi
+
+      - name: Rehearse scan without API requests
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/codecrucible/codecrucible" scan "$RUNNER_TEMP/base-v3" \
+            --paths app/ \
+            --dry-run \
+            --provider openai \
+            --model gpt-5.6-terra \
+            --prompts-dir "$RUNNER_TEMP/codecrucible/prompts/exploit-proof" \
+            --max-cost 1.00 \
+            --max-output-tokens 4000 \
+            --concurrency 1 \
+            2>&1 | tee artifacts/dry-run.txt
+
+      - name: Run bounded paid audit
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/codecrucible/codecrucible" scan "$RUNNER_TEMP/base-v3" \
+            --paths app/ \
+            --provider openai \
+            --model gpt-5.6-terra \
+            --prompts-dir "$RUNNER_TEMP/codecrucible/prompts/exploit-proof" \
+            --max-cost 1.00 \
+            --max-output-tokens 4000 \
+            --concurrency 1 \
+            --output artifacts/base-v3.sarif \
+            --phase-output-dir artifacts/phases
+
+      - name: Preserve audit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: codecrucible-base-v3-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

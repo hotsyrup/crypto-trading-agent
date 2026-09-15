@@ -33,6 +33,7 @@ REQUIRED_WARNINGS = {
     "CONTRACT_SECURITY_NOT_VERIFIED",
     "HOLDER_CONCENTRATION_NOT_VERIFIED",
 }
+STABLECOIN_PARTIAL_WARNINGS = REQUIRED_WARNINGS | {"MARKET_FIELDS_INCOMPLETE"}
 REQUIRED_METRICS = {
     "price_usd",
     "liquidity_usd",
@@ -127,20 +128,35 @@ def _validate_metrics(
 ) -> None:
     if not isinstance(metrics, dict) or set(metrics) != REQUIRED_METRICS | ENRICHMENT_METRICS:
         raise ValueError("market metrics are incomplete or unexpected")
-    if any(metrics[field] is None for field in REQUIRED_METRICS):
+    missing = {field for field in REQUIRED_METRICS if metrics[field] is None}
+    stablecoin_change_fields = {
+        "price_change_h24_percent",
+        "price_change_h6_percent",
+    }
+    if missing and not (
+        contract == USDC_CONTRACT and missing == stablecoin_change_fields
+    ):
         raise ValueError("market metrics contain null values")
 
     price = _finite_decimal(metrics["price_usd"], "price_usd")
     liquidity = _finite_decimal(metrics["liquidity_usd"], "liquidity_usd")
     volume_h24 = _finite_decimal(metrics["volume_h24_usd"], "volume_h24_usd")
     volume_h6 = _finite_decimal(metrics["volume_h6_usd"], "volume_h6_usd")
-    change_h24 = _finite_decimal(
-        metrics["price_change_h24_percent"],
-        "price_change_h24_percent",
+    change_h24 = (
+        None
+        if metrics["price_change_h24_percent"] is None
+        else _finite_decimal(
+            metrics["price_change_h24_percent"],
+            "price_change_h24_percent",
+        )
     )
-    change_h6 = _finite_decimal(
-        metrics["price_change_h6_percent"],
-        "price_change_h6_percent",
+    change_h6 = (
+        None
+        if metrics["price_change_h6_percent"] is None
+        else _finite_decimal(
+            metrics["price_change_h6_percent"],
+            "price_change_h6_percent",
+        )
     )
     _nonnegative_integer(metrics["buys_h24"], "buys_h24")
     _nonnegative_integer(metrics["sells_h24"], "sells_h24")
@@ -158,7 +174,11 @@ def _validate_metrics(
         raise ValueError("liquidity is outside the approved range")
     if not Decimal("0") <= volume_h6 <= volume_h24 <= Decimal("1000000000000"):
         raise ValueError("volume fields are inconsistent or outside the approved range")
-    if abs(change_h24) > Decimal("1000") or abs(change_h6) > Decimal("1000"):
+    if (
+        change_h24 is not None
+        and change_h6 is not None
+        and (abs(change_h24) > Decimal("1000") or abs(change_h6) > Decimal("1000"))
+    ):
         raise ValueError("price change is outside the approved range")
     if pair_created_at > received_at + MAX_FUTURE_SKEW:
         raise ValueError("pair creation time is after packet receipt")
@@ -205,7 +225,7 @@ def _validate_packet(
     if not isinstance(source, dict) or set(source) != {
         "provider", "discovery", "profile_url", "marketing_influenced",
         "promotion_type", "eligible_pair_count", "base_contract_address",
-        "quote_contract_address",
+        "quote_contract_address", "pair_created_at_provider",
     }:
         raise ValueError("research source fields do not match the strict contract")
     if (
@@ -214,6 +234,10 @@ def _validate_packet(
         or source.get("profile_url") is not None
         or source.get("marketing_influenced") is not False
         or source.get("promotion_type") is not None
+        or source.get("pair_created_at_provider") not in {
+            "dexscreener",
+            "geckoterminal_governed_universe",
+        }
     ):
         raise ValueError("research provider or discovery source is not approved")
     if (
@@ -224,12 +248,24 @@ def _validate_packet(
         raise ValueError("research pool asset identities are not approved")
     if _nonnegative_integer(source.get("eligible_pair_count"), "eligible_pair_count") < 1:
         raise ValueError("research source did not compare an eligible Base pool")
-    if packet.get("data_quality") != "complete":
-        raise ValueError("data_quality must be complete")
+    stablecoin_identity_only = (
+        contract == USDC_CONTRACT
+        and isinstance(packet.get("metrics"), dict)
+        and packet["metrics"].get("price_change_h24_percent") is None
+        and packet["metrics"].get("price_change_h6_percent") is None
+    )
+    expected_quality = "partial" if stablecoin_identity_only else "complete"
+    expected_warnings = (
+        STABLECOIN_PARTIAL_WARNINGS
+        if stablecoin_identity_only
+        else REQUIRED_WARNINGS
+    )
+    if packet.get("data_quality") != expected_quality:
+        raise ValueError(f"data_quality must be {expected_quality}")
     if (
         not isinstance(warnings, list)
         or any(not isinstance(warning, str) for warning in warnings)
-        or warnings != sorted(REQUIRED_WARNINGS)
+        or warnings != sorted(expected_warnings)
     ):
         raise ValueError("packet contains a disallowed warning")
     if (
@@ -351,7 +387,12 @@ def evaluate_research_payload(
         tuple(sorted(packet_id for packet_id, _ in accepted.values())),
         newest,
         max(int((current_time - oldest).total_seconds()), 0),
-        tuple("complete" for _ in accepted),
+        tuple(
+            "stablecoin_identity_only"
+            if selected[contract].get("data_quality") == "partial"
+            else "complete"
+            for contract in sorted(accepted)
+        ),
     )
 
 
